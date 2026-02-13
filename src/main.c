@@ -70,160 +70,17 @@ static size_t strlen(const char *s) {
   return len;
 }
 
-/* Minimal sprintf supporting: %d, %*d, %f, %6.2f, %8.4f, %s, %2d, %% */
-static int sprintf(char *buf, const char *fmt, ...) {
-  /* We use a varargs-free approach: stb_tilemap_editor's sprintf calls are
-   * all via the stbte__sprintf macro with known patterns:
-   *   - "%*d" with (digits, val) for info panel numbers
-   *   - "%6.2f" or "%8.4f" for float property display
-   *   - "%2d" for layer numbers
-   * We handle these specific patterns. */
+/* ---- sprintf via stb_sprintf ---- */
+/* Use Sean Barrett's full sprintf implementation instead of a hand-rolled
+ * subset. STB_SPRINTF_STATIC makes all functions static to avoid WASM
+ * export conflicts. */
+#define STB_SPRINTF_STATIC
+#define STB_SPRINTF_IMPLEMENTATION
+#include "stb_sprintf.h"
 
-  /* This is a simplified approach - we parse the format string and handle
-   * the specific patterns stb uses. We use __builtin_va_list since
-   * stdarg.h may not be available in freestanding. */
-  __builtin_va_list args;
-  __builtin_va_start(args, fmt);
-
-  char *out = buf;
-  while (*fmt) {
-    if (*fmt != '%') {
-      *out++ = *fmt++;
-      continue;
-    }
-    fmt++; /* skip '%' */
-
-    if (*fmt == '%') {
-      *out++ = '%';
-      fmt++;
-      continue;
-    }
-
-    /* Parse flags/width/precision */
-    int width = 0;
-    int precision = -1;
-    int star_width = 0;
-
-    /* Check for '*' width */
-    if (*fmt == '*') {
-      star_width = 1;
-      width = __builtin_va_arg(args, int);
-      fmt++;
-    } else {
-      /* Parse numeric width */
-      while (*fmt >= '0' && *fmt <= '9') {
-        width = width * 10 + (*fmt - '0');
-        fmt++;
-      }
-    }
-
-    /* Parse precision */
-    if (*fmt == '.') {
-      fmt++;
-      precision = 0;
-      while (*fmt >= '0' && *fmt <= '9') {
-        precision = precision * 10 + (*fmt - '0');
-        fmt++;
-      }
-    }
-
-    /* Format specifier */
-    switch (*fmt) {
-    case 'd': {
-      int val = __builtin_va_arg(args, int);
-      char tmp[16];
-      int neg = 0;
-      unsigned int uval;
-      if (val < 0) {
-        neg = 1;
-        uval = (unsigned int)(-(val + 1)) + 1;
-      } else {
-        uval = (unsigned int)val;
-      }
-      int len = 0;
-      if (uval == 0) {
-        tmp[len++] = '0';
-      } else {
-        while (uval > 0) {
-          tmp[len++] = '0' + (uval % 10);
-          uval /= 10;
-        }
-      }
-      /* Add padding spaces */
-      int total = len + neg;
-      while (total < width) {
-        *out++ = ' ';
-        total++;
-      }
-      if (neg)
-        *out++ = '-';
-      for (int i = len - 1; i >= 0; i--)
-        *out++ = tmp[i];
-      fmt++;
-      break;
-    }
-    case 'f': {
-      double val = __builtin_va_arg(args, double);
-      if (precision < 0)
-        precision = 2;
-      /* Format float */
-      if (val < 0) {
-        *out++ = '-';
-        val = -val;
-      }
-      int int_part = (int)val;
-      double frac = val - (double)int_part;
-
-      /* Integer part */
-      char tmp[16];
-      int len = 0;
-      if (int_part == 0) {
-        tmp[len++] = '0';
-      } else {
-        unsigned int ui = (unsigned int)int_part;
-        while (ui > 0) {
-          tmp[len++] = '0' + (ui % 10);
-          ui /= 10;
-        }
-      }
-      /* Width padding (total width includes decimal point and precision) */
-      int total_len = len + 1 + precision + (val < 0 ? 1 : 0);
-      while (total_len < width) {
-        *out++ = ' ';
-        total_len++;
-      }
-      for (int i = len - 1; i >= 0; i--)
-        *out++ = tmp[i];
-
-      *out++ = '.';
-      for (int i = 0; i < precision; i++) {
-        frac *= 10.0;
-        int digit = (int)frac;
-        *out++ = '0' + digit;
-        frac -= digit;
-      }
-      fmt++;
-      break;
-    }
-    case 's': {
-      const char *s = __builtin_va_arg(args, const char *);
-      if (s) {
-        while (*s)
-          *out++ = *s++;
-      }
-      fmt++;
-      break;
-    }
-    default:
-      *out++ = *fmt++;
-      break;
-    }
-  }
-
-  __builtin_va_end(args);
-  *out = '\0';
-  return (int)(out - buf);
-}
+/* Map bare sprintf to stbsp_sprintf so stb_tilemap_editor.h's
+ * stbte__sprintf macro (which expands to sprintf) resolves correctly. */
+#define sprintf stbsp_sprintf
 
 /* ---- Assert ---- */
 #define STBTE_ASSERT(x) ((void)0)
