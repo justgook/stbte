@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fullscreen Canvas</title>
+  <title>STB Tilemap Editor</title>
   <style>
     body,
     html {
@@ -18,10 +18,12 @@
 </head>
 
 <body>
+  <script src="./coi-serviceworker.js"></script>
+  <script type="module">
+    import ViewStbEditor from "./view-stb-editor.js"
+    customElements.define("view-stb-editor", ViewStbEditor);
+  </script>
   <view-stb-editor></view-stb-editor>
-  <!-- <canvas id="canvas"></canvas> -->
-  <script src="/coi-serviceworker.js"></script>
-  <script type="module" src="/app.js"></script>
 </body>
 
 </html>
