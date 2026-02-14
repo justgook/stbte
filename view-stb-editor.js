@@ -626,8 +626,8 @@ export default class ViewStbEditor extends HTMLElement {
   async _loadTileSets() {
     const tileSize = this.tileSpacingX
     const categories = [
-      // { name: 'floor', file: 'floor-16x16.png', categoryIndex: 3 },
-      // { name: 'walls_low', file: 'walls_low-16x16.png', categoryIndex: 4 },
+      { name: 'floor', file: 'floor-16x16.png', categoryIndex: 3 },
+      { name: 'walls_low', file: 'walls_low-16x16.png', categoryIndex: 4 },
       { name: 'walls_high', file: 'walls_high-16x32.png', categoryIndex: 5 }
     ]
     let nextTileId = 1
@@ -637,12 +637,17 @@ export default class ViewStbEditor extends HTMLElement {
       const img = await this._loadImage(url)
       const cols = Math.floor(img.width / tileSize)
       const rows = Math.floor(img.height / tileSize)
+      const tileCount = cols * rows
+      console.log(`Loading ${cat.name}: ${img.width}x${img.height}, ${cols}x${rows} = ${tileCount} tiles`)
       for (let y = 0; y < rows; y++) {
         for (let x = 0; x < cols; x++) {
           const tileId = nextTileId++
-          await this._workerCall('call', {
+          const result = await this._workerCall('call', {
             calls: [['define_tile', tileId, 0xFF, cat.categoryIndex]]
           })
+          if (result.results[0] !== 0) {
+            console.error(`Failed to define tile ${tileId} for ${cat.name}: error ${result.results[0]}`)
+          }
           this.tileImages.set(tileId, {
             image: img,
             sx: x * tileSize,
@@ -653,7 +658,7 @@ export default class ViewStbEditor extends HTMLElement {
         }
       }
     }
-    console.log('Loaded', this.tileImages.size, 'tiles')
+    console.log('Loaded', this.tileImages.size, 'tiles (tile IDs 1..' + (nextTileId-1) + ')')
   }
 
   _loadImage(url) {

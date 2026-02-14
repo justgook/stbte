@@ -142,7 +142,7 @@ static void cmd_push_rect(int x0, int y0, int x1, int y1, unsigned int color) {
 /* Tile ID fixup table: maps palette slot -> real tile ID.
  * Populated after stb_tilemap_editor.h is included and tiles are defined.
  * Used to convert imgui hit-test IDs to real tile IDs in DRAW_TILE. */
-#define MAX_TILE_SLOTS 256
+#define MAX_TILE_SLOTS 1024
 static uint16_t tile_slot_to_id[MAX_TILE_SLOTS];
 static int tile_slot_count = 0;
 
@@ -403,7 +403,7 @@ __attribute__((export_name("init"))) uint32_t init(void) {
   int spacing_y = control_block.spacing_y;
   if (spacing_x == 0) spacing_x = 16;
   if (spacing_y == 0) spacing_y = 16;
-  int max_tiles = 256;
+  int max_tiles = 1024;
 
   tilemap = stbte_create_map((int)map_x, (int)map_y, (int)layers, spacing_x,
                              spacing_y, max_tiles);
@@ -483,10 +483,9 @@ __attribute__((export_name("define_tile"))) uint32_t define_tile_export(uint32_t
   }
   stbte_define_tile(tilemap, (unsigned short)id, (unsigned int)layermask, category);
   tile_slot_count = tilemap->num_tiles;
-  if (tile_slot_count <= MAX_TILE_SLOTS) {
-    for (int i = 0; i < tile_slot_count; i++) {
-      tile_slot_to_id[i] = tilemap->tiles[i].id;
-    }
+  int limit = tile_slot_count < MAX_TILE_SLOTS ? tile_slot_count : MAX_TILE_SLOTS;
+  for (int i = 0; i < limit; i++) {
+    tile_slot_to_id[i] = tilemap->tiles[i].id;
   }
   return 0;
 }
