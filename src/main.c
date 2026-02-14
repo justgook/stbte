@@ -146,6 +146,16 @@ static void cmd_push_rect(int x0, int y0, int x1, int y1, unsigned int color) {
 static uint16_t tile_slot_to_id[MAX_TILE_SLOTS];
 static int tile_slot_count = 0;
 
+static const char *category_names[] = {
+  "default",
+  "terrain",
+  "objects",
+  "floor",
+  "walls_low",
+  "walls_high"
+};
+#define CATEGORY_COUNT (sizeof(category_names)/sizeof(category_names[0]))
+
 static void cmd_push_tile(int x0, int y0, unsigned short id, int highlight,
                           float *data) {
   uint32_t *count = cmd_current_count();
@@ -213,7 +223,9 @@ typedef struct {
   volatile uint32_t map_width;
   volatile uint32_t map_height;
   volatile uint32_t num_layers;
-  volatile uint32_t padding[4]; /* align to 64 bytes */
+  volatile uint32_t spacing_x;
+  volatile uint32_t spacing_y;
+  volatile uint32_t padding[2]; /* align to 64 bytes */
 } control_block_t;
 
 static control_block_t control_block;
@@ -386,9 +398,11 @@ __attribute__((export_name("init"))) uint32_t init(void) {
   if (layers > STBTE_MAX_LAYERS)
     layers = STBTE_MAX_LAYERS;
 
-  /* Default tile spacing (16x16 pixels) */
-  int spacing_x = 16;
-  int spacing_y = 16;
+  /* Tile spacing (0 means default 16x16) */
+  int spacing_x = control_block.spacing_x;
+  int spacing_y = control_block.spacing_y;
+  if (spacing_x == 0) spacing_x = 16;
+  if (spacing_y == 0) spacing_y = 16;
   int max_tiles = 256;
 
   tilemap = stbte_create_map((int)map_x, (int)map_y, (int)layers, spacing_x,
@@ -400,15 +414,11 @@ __attribute__((export_name("init"))) uint32_t init(void) {
   /* Set default display (will be overridden by EVT_RESIZE) */
   stbte_set_display(0, 0, 800, 600);
   display_set = 1;
+  /* Set spacing for map and palette (same values) */
+  stbte_set_spacing(tilemap, spacing_x, spacing_y, spacing_x, spacing_y);
 
-  /* Register some placeholder tiles for testing */
-  /* Users will call define_tile() to set up real tiles */
+  /* Register a default background tile; other tiles can be added via define_tile() */
   stbte_define_tile(tilemap, 0, 0xFF, "default");
-  stbte_define_tile(tilemap, 1, 0xFF, "default");
-  stbte_define_tile(tilemap, 2, 0xFF, "default");
-  stbte_define_tile(tilemap, 3, 0xFF, "terrain");
-  stbte_define_tile(tilemap, 4, 0xFF, "terrain");
-  stbte_define_tile(tilemap, 5, 0xFF, "objects");
 
   /* Populate tile slot -> real ID lookup table */
   tile_slot_count = tilemap->num_tiles;
@@ -464,10 +474,26 @@ __attribute__((export_name("frame"))) uint32_t frame(void) {
 /* Define a new tile type.
  * Host writes tile info to a staging area, then calls this.
  * For simplicity, we use the PDK input mechanism. */
-__attribute__((export_name("define_tile"))) uint32_t define_tile_export(void) {
-  /* Input format: 4 bytes id (uint16) + 4 bytes layermask (uint32) +
-   * null-terminated category string */
-  /* For now, tiles are defined in init(). This will be expanded in Phase 2. */
+__attribute__((export_name("define_tile"))) uint32_t define_tile_export(uint32_t id, uint32_t layermask, uint32_t category_index) {
+  if (tilemap == NULL) return 1;
+  if (id > 65535) return 3;
+  const char *category = "default";
+  if (category_index < CATEGORY_COUNT) {
+    category = category_names[category_index];
+  }
+  stbte_define_tile(tilemap, (unsigned short)id, (unsigned int)layermask, category);
+  tile_slot_count = tilemap->num_tiles;
+  if (tile_slot_count <= MAX_TILE_SLOTS) {
+    for (int i = 0; i < tile_slot_count; i++) {
+      tile_slot_to_id[i] = tilemap->tiles[i].id;
+    }
+  }
+  return 0;
+}
+
+__attribute__((export_name("set_spacing"))) uint32_t set_spacing(uint32_t sx, uint32_t sy) {
+  if (tilemap == NULL) return 1;
+  stbte_set_spacing(tilemap, (int)sx, (int)sy, (int)sx, (int)sy);
   return 0;
 }
 

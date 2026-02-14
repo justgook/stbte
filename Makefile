@@ -60,9 +60,9 @@ web: stb_tilemap_editor.wasm | $(BUILD_DIR)
 	$(Q)echo "Creating production web build in $(BUILD_DIR)/web/..."
 	$(Q)$(MKDIR_P) $(BUILD_DIR)/web
 	$(Q)$(MV) $< $(BUILD_DIR)/web/
-	# $(Q)$(CP) *.css $(BUILD_DIR)/web/
 	$(Q)$(CP) *.js $(BUILD_DIR)/web/
 	$(Q)$(CP) *.html $(BUILD_DIR)/web/
+	$(Q)$(CP) -r example $(BUILD_DIR)/web/
 
 .PHONY: clean
 clean:

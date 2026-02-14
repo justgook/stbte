@@ -19,6 +19,7 @@
 // Command types (must match main.c)
 const CMD_RECT = 1
 const CMD_TILE = 2
+const DEBU_TILE_NR = false
 
 // Event types (must match main.c)
 const EVT_MOUSE_MOVE = 1
@@ -78,6 +79,13 @@ export default class ViewStbEditor extends HTMLElement {
 
     /** @type {Map<number, {resolve: Function, reject: Function}>} */
     this._pending = new Map()
+
+    /** @type {Map<number, {image: HTMLImageElement, sx: number, sy: number, sw: number, sh: number}>} */
+    this.tileImages = new Map()
+    /** @type {number} */
+    this.tileSpacingX = 16
+    /** @type {number} */
+    this.tileSpacingY = 16
 
     // Bind methods
     this._renderLoop = this._renderLoop.bind(this)
@@ -245,10 +253,14 @@ export default class ViewStbEditor extends HTMLElement {
       // 3. Write map configuration to control block (must be before init)
       const controlView = new Int32Array(this.wasmMemory.buffer, controlBlockPtr, controlBlockSize / 4)
       // Control block layout (uint32 offsets):
-      //  9: map_width, 10: map_height, 11: num_layers
+      //  9: map_width, 10: map_height, 11: num_layers, 12: spacing_x, 13: spacing_y
       Atomics.store(controlView, 9, 16)   // mapWidth
       Atomics.store(controlView, 10, 16)  // mapHeight
       Atomics.store(controlView, 11, 20)  // numLayers
+      Atomics.store(controlView, 12, 16)  // spacing_x
+      Atomics.store(controlView, 13, 16)  // spacing_y
+      this.tileSpacingX = 16
+      this.tileSpacingY = 16
 
       // 4. Initialize editor
       const initCall = await this._workerCall('call', {
@@ -258,7 +270,10 @@ export default class ViewStbEditor extends HTMLElement {
         throw new Error(`WASM init() failed with code ${initCall.results[0]}`)
       }
 
-      // 5. Write initial resize event to event buffer
+      // 5. Load tile images and define tiles
+      await this._loadTileSets()
+
+      // 6. Write initial resize event to event buffer
       const evtView = new Int32Array(this.wasmMemory.buffer, evtBufPtr, evtBufSize)
 
       // Write resize event
@@ -412,29 +427,54 @@ export default class ViewStbEditor extends HTMLElement {
           const x0 = (xy0 & 0xFFFF) << 16 >> 16
           const y0 = (xy0 >> 16) << 16 >> 16
 
-          // Phase 1: Draw colored rectangle with tile ID
-          const colorIdx = tileId % TILE_COLORS.length
-          ctx.fillStyle = TILE_COLORS[colorIdx]
-
-          // Apply highlight mode
-          if (highlight === 0) {
-            ctx.globalAlpha = 0.4 // deemphasize
-          } else if (highlight === 2) {
-            ctx.globalAlpha = 1.0 // emphasize (brighter)
+          // Look up tile image
+          const tileData = this.tileImages.get(tileId)
+          if (tileData) {
+            // Apply highlight mode
+            if (highlight === 0) {
+              ctx.globalAlpha = 0.4 // deemphasize
+            } else if (highlight === 2) {
+              ctx.globalAlpha = 1.0 // emphasize (brighter)
+            } else {
+              ctx.globalAlpha = 0.8 // normal
+            }
+            // Draw image tile
+            ctx.drawImage(
+              tileData.image,
+              tileData.sx, tileData.sy, tileData.sw, tileData.sh,
+              x0, y0, this.tileSpacingX, this.tileSpacingY
+            )
+            // Draw tile ID text (for debugging)
+            if (DEBU_TILE_NR) {
+              ctx.globalAlpha = 1.0
+              ctx.fillStyle = '#ffffff'
+              ctx.font = '8px monospace'
+              ctx.textAlign = 'center'
+              ctx.textBaseline = 'middle'
+              ctx.fillText(String(tileId), x0 + this.tileSpacingX / 2, y0 + this.tileSpacingY / 2)
+            }
           } else {
-            ctx.globalAlpha = 0.8 // normal
+            // Fallback: colored rectangle with tile ID
+            const colorIdx = tileId % TILE_COLORS.length
+            ctx.fillStyle = TILE_COLORS[colorIdx]
+            // Apply highlight mode
+            if (highlight === 0) {
+              ctx.globalAlpha = 0.4
+            } else if (highlight === 2) {
+              ctx.globalAlpha = 1.0
+            } else {
+              ctx.globalAlpha = 0.8
+            }
+            ctx.fillRect(x0, y0, this.tileSpacingX, this.tileSpacingY)
+            // Draw tile ID text
+
+            ctx.globalAlpha = 1.0
+            ctx.fillStyle = '#ffffff'
+            ctx.font = '8px monospace'
+            ctx.textAlign = 'center'
+            ctx.textBaseline = 'middle'
+            ctx.fillText(String(tileId), x0 + this.tileSpacingX / 2, y0 + this.tileSpacingY / 2)
           }
-
-          // Default tile size from stb spacing (16x16)
-          ctx.fillRect(x0, y0, 16, 16)
-
-          // Draw tile ID text
-          ctx.globalAlpha = 1.0
-          ctx.fillStyle = '#ffffff'
-          ctx.font = '8px monospace'
-          ctx.textAlign = 'center'
-          ctx.textBaseline = 'middle'
-          ctx.fillText(String(tileId), x0 + 8, y0 + 8)
 
           i += 4
           break
@@ -581,5 +621,50 @@ export default class ViewStbEditor extends HTMLElement {
       e.preventDefault()
       this._pushEvent(EVT_ACTION, [action])
     }
+  }
+
+  async _loadTileSets() {
+    const tileSize = this.tileSpacingX
+    const categories = [
+      // { name: 'floor', file: 'floor-16x16.png', categoryIndex: 3 },
+      // { name: 'walls_low', file: 'walls_low-16x16.png', categoryIndex: 4 },
+      { name: 'walls_high', file: 'walls_high-16x32.png', categoryIndex: 5 }
+    ]
+    let nextTileId = 1
+
+    for (const cat of categories) {
+      const url = new URL(`./example/${cat.file}`, import.meta.url).toString()
+      const img = await this._loadImage(url)
+      const cols = Math.floor(img.width / tileSize)
+      const rows = Math.floor(img.height / tileSize)
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          const tileId = nextTileId++
+          await this._workerCall('call', {
+            calls: [['define_tile', tileId, 0xFF, cat.categoryIndex]]
+          })
+          this.tileImages.set(tileId, {
+            image: img,
+            sx: x * tileSize,
+            sy: y * tileSize,
+            sw: tileSize,
+            sh: tileSize
+          })
+        }
+      }
+    }
+    console.log('Loaded', this.tileImages.size, 'tiles')
+  }
+
+  _loadImage(url) {
+    return new Promise((resolve, reject) => {
+      const img = new Image()
+      img.onload = () => resolve(img)
+      img.onerror = (e) => {
+        console.error('Failed to load tile image:', url, e)
+        reject(new Error(`Failed to load image: ${url}`))
+      }
+      img.src = url
+    })
   }
 }
