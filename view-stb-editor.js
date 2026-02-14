@@ -73,6 +73,12 @@ export default class ViewStbEditor extends HTMLElement {
     /** @type {number|null} */
     this.animFrameId = null
 
+    /** @type {number} */
+    this._requestId = 0
+
+    /** @type {Map<number, {resolve: Function, reject: Function}>} */
+    this._pending = new Map()
+
     // Bind methods
     this._renderLoop = this._renderLoop.bind(this)
     this._onMouseMove = this._onMouseMove.bind(this)
@@ -90,6 +96,21 @@ export default class ViewStbEditor extends HTMLElement {
         }
       }
     })
+  }
+
+  /**
+   * Send a message to the worker and return a promise for the response.
+   * @param {string} type - Message type
+   * @param {Object} payload - Message payload
+   * @returns {Promise<Object>}
+   */
+  async _workerCall(type, payload = {}) {
+    const id = ++this._requestId
+    const promise = new Promise((resolve, reject) => {
+      this._pending.set(id, { resolve, reject })
+    })
+    this.worker.postMessage({ type, id, ...payload })
+    return promise
   }
 
   connectedCallback() {
@@ -144,7 +165,14 @@ export default class ViewStbEditor extends HTMLElement {
     this.removeEventListener('keydown', this._onKeyDown)
 
     if (this.worker) {
-      this.worker.postMessage({ type: 'stop' })
+      // Reject all pending promises
+      for (const [id, pending] of this._pending) {
+        pending.reject(new Error('Worker terminated'))
+      }
+      this._pending.clear()
+
+      // Send stop (ignore response since we terminate immediately)
+      this.worker.postMessage({ type: 'stop', id: 0 })
       this.worker.terminate()
       this.worker = null
     }
@@ -156,7 +184,7 @@ export default class ViewStbEditor extends HTMLElement {
   async _initWorker() {
     try {
       this.worker = new Worker(
-        new URL('./worker.js', import.meta.url),
+        new URL('./wasm-worker.js', import.meta.url),
         { type: 'module' }
       )
 
@@ -169,52 +197,133 @@ export default class ViewStbEditor extends HTMLElement {
       const w = this.clientWidth || 800
       const h = this.clientHeight || 600
 
-      // Initialize the WASM module
-      this.worker.postMessage({
-        type: 'init',
-        wasmUrl: '/stb_tilemap_editor.wasm',
-        config: {
-          mapWidth: 16,
-          mapHeight: 16,
-          numLayers: 20,
-          displayWidth: w,
-          displayHeight: h
+      // 1. Initialize WASM module
+      const initResult = await this._workerCall('init', {
+        wasmUrl: new URL('./stb_tilemap_editor.wasm', import.meta.url).toString(),
+        memoryConfig: {
+          initial: 158,   // ~10MB (matches stb_tilemap_editor)
+          maximum: 512,   // ~32MB
+          shared: true
         }
       })
+      this.wasmMemory = initResult.memory
+
+      // 2. Fetch buffer pointers
+      const pointerCalls = [
+        ['get_cmd_buf_a_ptr'],
+        ['get_cmd_buf_b_ptr'],
+        ['get_event_buf_ptr'],
+        ['get_control_block_ptr'],
+        ['get_evt_head_ptr'],
+        ['get_cmd_buf_size'],
+        ['get_evt_buf_size'],
+        ['get_control_block_size']
+      ]
+      const pointerResults = await this._workerCall('call', { calls: pointerCalls })
+      const [
+        cmdBufAPtr,
+        cmdBufBPtr,
+        evtBufPtr,
+        controlBlockPtr,
+        evtHeadPtr,
+        cmdBufSize,
+        evtBufSize,
+        controlBlockSize
+      ] = pointerResults.results
+
+      this.pointers = {
+        cmdBufA: cmdBufAPtr,
+        cmdBufB: cmdBufBPtr,
+        evtBuf: evtBufPtr,
+        controlBlock: controlBlockPtr,
+        evtHead: evtHeadPtr,
+        cmdBufSize,
+        evtBufSize,
+        controlBlockSize
+      }
+
+      // 3. Write map configuration to control block (must be before init)
+      const controlView = new Int32Array(this.wasmMemory.buffer, controlBlockPtr, controlBlockSize / 4)
+      // Control block layout (uint32 offsets):
+      //  9: map_width, 10: map_height, 11: num_layers
+      Atomics.store(controlView, 9, 16)   // mapWidth
+      Atomics.store(controlView, 10, 16)  // mapHeight
+      Atomics.store(controlView, 11, 20)  // numLayers
+
+      // 4. Initialize editor
+      const initCall = await this._workerCall('call', {
+        calls: [['init']]
+      })
+      if (initCall.results[0] !== 0) {
+        throw new Error(`WASM init() failed with code ${initCall.results[0]}`)
+      }
+
+      // 5. Write initial resize event to event buffer
+      const evtView = new Int32Array(this.wasmMemory.buffer, evtBufPtr, evtBufSize)
+
+      // Write resize event
+      evtView[0] = 5 // EVT_RESIZE
+      evtView[1] = 0 // x0
+      evtView[2] = 0 // y0
+      evtView[3] = w
+      evtView[4] = h
+      // Update event head
+      Atomics.store(controlView, 3, 5) // evt_head = 5 words
+
+      // 5. Run one frame to generate initial draw commands
+      await this._workerCall('call', { calls: [['frame']] })
+
+      // 6. Start periodic frame loop (~60fps)
+      await this._workerCall('start', { func: 'frame', interval: 16 })
+
+      // 7. Start our render loop
+      this.running = true
+      this.animFrameId = requestAnimationFrame(this._renderLoop)
+
+      // 8. Send initial resize (in case dimensions changed during load)
+      this._handleResize(this.clientWidth, this.clientHeight)
+
     } catch (err) {
-      console.error('Failed to create stb-editor worker:', err)
+      console.error('Failed to initialize stb-editor:', err)
+      this.running = false
+      if (this.worker) {
+        this.worker.terminate()
+        this.worker = null
+      }
     }
   }
 
   _onWorkerMessage(e) {
-    const { type, ...data } = e.data
+    const { type, id, ...data } = e.data
 
+    // Handle request/response messages
+    if (id !== undefined) {
+      const pending = this._pending.get(id)
+      if (pending) {
+        this._pending.delete(id)
+        if (type === 'success') {
+          pending.resolve(data)
+        } else if (type === 'error') {
+          pending.reject(new Error(data.error?.message || String(data.error)))
+        } else {
+          console.warn('stb-editor: unknown response type:', type, data)
+        }
+        return
+      }
+    }
+
+    // Handle unsolicited messages
     switch (type) {
-      case 'init-success':
-        this.wasmMemory = data.memory
-        this.pointers = data.pointers
-        this.running = true
-
-        // Start the worker's frame loop
-        this.worker.postMessage({ type: 'start' })
-
-        // Send initial resize
-        this._handleResize(this.clientWidth, this.clientHeight)
-
-        // Start our render loop
-        this.animFrameId = requestAnimationFrame(this._renderLoop)
-        break
-
-      case 'error':
-        console.error('stb-editor worker error:', data.error)
-        break
-
-      case 'started':
-      case 'stopped':
+      case 'memory-grown':
+        // Memory buffer changed, update our reference
+        if (this.wasmMemory && data.buffer) {
+          // The buffer property is the same SharedArrayBuffer
+          // We need to update ArrayBuffer views in render loop
+        }
         break
 
       default:
-        console.warn('stb-editor: unknown worker message:', type)
+        console.warn('stb-editor: unknown worker message:', type, data)
     }
   }
 
