@@ -1,6 +1,5 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -12,23 +11,14 @@
       background: #1a1a1a;
       color: #ddd;
     }
-
-    h1 {
-      color: #8f8;
-    }
-
-    h2 {
-      color: #88f;
-      margin-top: 30px;
-    }
-
+    h1 { color: #8f8; }
+    h2 { color: #88f; margin-top: 30px; }
     .section {
       background: #2a2a2a;
       padding: 15px;
       margin: 10px 0;
       border-radius: 5px;
     }
-
     button {
       background: #444;
       color: #fff;
@@ -38,47 +28,27 @@
       cursor: pointer;
       border-radius: 3px;
     }
-
-    button:hover {
-      background: #555;
-    }
-
-    button.active {
-      background: #484;
-    }
-
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    .tool-btn {
-      min-width: 100px;
-    }
-
-    .layer-btn {
-      min-width: 80px;
-    }
-
+    button:hover { background: #555; }
+    button.active { background: #484; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .tool-btn { min-width: 100px; }
+    .layer-btn { min-width: 80px; }
     #tilemap {
       border: 2px solid #666;
       background: #000;
       cursor: crosshair;
       image-rendering: pixelated;
     }
-
     .info {
       font-size: 12px;
       color: #888;
     }
-
     .tile-grid {
       display: grid;
       grid-template-columns: repeat(8, 32px);
       gap: 2px;
       margin: 10px 0;
     }
-
     .tile-btn {
       width: 32px;
       height: 32px;
@@ -90,37 +60,21 @@
       justify-content: center;
       font-size: 10px;
     }
-
-    .tile-btn:hover {
-      background: #444;
-    }
-
-    .tile-btn.active {
-      border: 2px solid #8f8;
-    }
-
+    .tile-btn:hover { background: #444; }
+    .tile-btn.active { border: 2px solid #8f8; }
     .category-tabs {
       display: flex;
       gap: 5px;
       margin: 10px 0;
     }
-
     .category-tab {
       padding: 5px 15px;
       background: #333;
       border: 1px solid #555;
       cursor: pointer;
     }
-
-    .category-tab:hover {
-      background: #444;
-    }
-
-    .category-tab.active {
-      background: #448;
-      border-color: #66f;
-    }
-
+    .category-tab:hover { background: #444; }
+    .category-tab.active { background: #448; border-color: #66f; }
     #output {
       background: #111;
       padding: 10px;
@@ -130,25 +84,11 @@
       overflow-y: auto;
       white-space: pre-wrap;
     }
-
-    .control-group {
-      display: inline-block;
-      margin: 0 15px 10px 0;
-      vertical-align: top;
-    }
-
-    label {
-      display: block;
-      font-size: 11px;
-      margin-bottom: 5px;
-      color: #888;
-    }
   </style>
 </head>
-
 <body>
   <h1>STB Tilemap Editor - Headless WASM</h1>
-  <p class="info">Pure WASM implementation with HTML/Canvas UI. No properties or links.</p>
+  <p class="info">Minimal API: Actions only. State accessed via memory pointers.</p>
 
   <div class="section">
     <h2>Tools</h2>
@@ -198,7 +138,6 @@
   </div>
 
   <script type="module">
-    // WASM Module loader and API wrapper
     class STBTileEditor {
       constructor() {
         this.wasm = null;
@@ -209,107 +148,179 @@
         this.mapWidth = 20;
         this.mapHeight = 15;
         this.layers = 3;
-        this.currentTool = 1; // Brush
+        this.currentTool = 1;
         this.selectedTile = 0;
         this.selectedLayer = -1;
+        this.selectedCategory = -1;
         this.showGrid = true;
-        this.clipboard = null;
+        this.offsets = {};
+        
+        // Frontend-only names (not passed to WASM)
+        // Note: category 0 is special (includes all tiles), categories 1-3 are user-defined
+        this.categoryNames = ['All', 'Floor', 'Walls', 'Objects', 'Misc'];
+        this.layerNames = ['Ground', 'Mid', 'Top'];
       }
 
       async init() {
-        const response = await fetch('./stb_tilemap_editor.wasm');
-        const wasmBytes = await response.arrayBuffer();
-
-        const importObject = {
-          env: {
-            memory: new WebAssembly.Memory({initial: 256, maximum: 512})
+        try {
+          log('Starting WASM initialization...');
+          
+          const response = await fetch('./stb_tilemap_editor.wasm');
+          log('WASM file fetched');
+          const wasmBytes = await response.arrayBuffer();
+          log(`WASM file size: ${wasmBytes.byteLength} bytes`);
+          
+          // Create shared memory for WASM import (must match WASM --initial-memory)
+          const memory = new WebAssembly.Memory({
+            initial: 288,  // 288 pages = 18MB (matches WASM --initial-memory)
+            maximum: 512,  // 512 pages = 32MB
+            shared: true
+          });
+          log('Shared memory created');
+          
+          const importObject = { env: { memory } };
+          
+          log('Instantiating WASM...');
+          const { instance } = await WebAssembly.instantiate(wasmBytes, importObject);
+          this.wasm = instance;
+          this.memory = memory;  // Use imported memory
+          this.exports = instance.exports;
+          
+          console.log('=== WASM Exported Functions ===');
+          const exports = Object.keys(instance.exports).sort();
+          exports.forEach(name => console.log(`  ${name}: ${typeof instance.exports[name]}`));
+          console.log(`Total exports: ${exports.length}`);
+          
+          log('Loading offsets...');
+          this.loadOffsets();
+          log('Offsets loaded');
+          
+          log('About to call stbte_create...');
+          this.tilemap = this.exports.stbte_create(
+            this.mapWidth, this.mapHeight, this.layers,
+            this.tileSize, this.tileSize, 256
+          );
+          log(`stbte_create returned: ${this.tilemap} (0x${this.tilemap.toString(16)})`);
+          
+          if (this.tilemap === 0) {
+            log('ERROR: stbte_create returned 0 (null pointer)');
+            return;
           }
-        };
-
-        const {instance} = await WebAssembly.instantiate(wasmBytes, importObject);
-        this.wasm = instance;
-        this.memory = instance.exports.memory;
-        this.exports = instance.exports;
-
-        // Log all exported functions
-        console.log('=== WASM Exported Functions ===');
-        const exports = Object.keys(instance.exports).sort();
-        const delme = []
-        exports.forEach(name => {
-          const type = typeof instance.exports[name];
-          delme.push(`  ${name}: ${type}`)
-          console.log(`  ${name}: ${type}`);
-        });
-        console.log(`Total exports: ${exports.length}`);
-        console.log(delme.join("\n"))
-
-        // Create tilemap
-        this.tilemap = this.exports.stbte_create(
-          this.mapWidth,
-          this.mapHeight,
-          this.layers,
-          this.tileSize,
-          this.tileSize,
-          256
-        );
-
-        // Define some test tiles
-        this.defineTiles();
-
-        // Set background tile
+          
+          log(`Tilemap created successfully`);
+          
+          // Debug: Check tilemap values after creation
+          log(`num_tiles offset: ${this.offsets.tm_num_tiles}`);
+          log(`Initial num_tiles: ${this.getNumTiles()}`);
+          
+          log('Defining tiles...');
+          this.defineTiles();
+          log('Tiles defined');
+        
+        // Debug: Check after defining tiles
+        const numTiles = this.getNumTiles();
+        const numCats = this.getNumCategories();
+        log(`After defineTiles - num_tiles: ${numTiles}`);
+        log(`After defineTiles - num_categories: ${numCats}`);
+        
+        // Read tiles pointer
+        const tilesPtr = this.readTilemap(this.offsets.tm_tiles, 'i32');
+        log(`tiles pointer value: 0x${tilesPtr.toString(16)}`);
+        
+        // Check if tiles pointer is valid
+        if (tilesPtr > 0 && tilesPtr < this.memory.buffer.byteLength) {
+          // Try reading first tile
+          const tileBase = tilesPtr;
+          const tileId = new DataView(this.memory.buffer, tileBase + this.offsets.tileinfo_id, 2).getUint16(0, true);
+          log(`First tile ID: ${tileId}`);
+        } else {
+          log(`Invalid tiles pointer!`);
+        }
+        
         this.exports.stbte_set_background_tile(this.tilemap, 0);
-
-        log('WASM initialized successfully!');
-        log(`Tilemap: ${this.mapWidth}x${this.mapHeight}, ${this.layers} layers`);
-
+        log('Background tile set');
+        
+        log('Setting up UI...');
         this.setupUI();
+        log('UI setup complete');
+        
+        log('Rendering...');
         this.render();
+        log('Render complete - initialization finished!');
+        
+        } catch (e) {
+          log(`FATAL ERROR: ${e.message}`);
+          log(`Stack: ${e.stack}`);
+          console.error('Initialization error:', e);
+          throw e;
+        }
       }
 
-      defineTiles() {
-        // Define tiles with IDs and categories
-        const tiles = [
-          {id: 0, mask: 0xFF, cat: 'default'},
-          {id: 1, mask: 0x01, cat: 'floor'},
-          {id: 2, mask: 0x01, cat: 'floor'},
-          {id: 3, mask: 0x01, cat: 'floor'},
-          {id: 10, mask: 0x02, cat: 'walls'},
-          {id: 11, mask: 0x02, cat: 'walls'},
-          {id: 12, mask: 0x02, cat: 'walls'},
-          {id: 20, mask: 0x04, cat: 'objects'},
-          {id: 21, mask: 0x04, cat: 'objects'},
-          {id: 22, mask: 0x04, cat: 'objects'},
-          {id: 23, mask: 0x04, cat: 'objects'},
+      loadOffsets() {
+        const names = [
+          'stbte_offset_tilemap_max_x', 'stbte_offset_tilemap_max_y',
+          'stbte_offset_tilemap_num_layers', 'stbte_offset_tilemap_num_tiles',
+          'stbte_offset_tilemap_cur_tile', 'stbte_offset_tilemap_cur_layer',
+          'stbte_offset_tilemap_solo_layer', 'stbte_offset_tilemap_cur_category',
+          'stbte_offset_tilemap_background_tile', 'stbte_offset_tilemap_num_categories',
+          'stbte_offset_tilemap_data', 'stbte_offset_tilemap_tiles',
+          'stbte_offset_tilemap_layerinfo', 'stbte_offset_tilemap_undo_available',
+          'stbte_offset_tilemap_redo_available', 'stbte_offset_layer_hidden',
+          'stbte_offset_layer_locked', 'stbte_offset_tileinfo_id',
+          'stbte_offset_tileinfo_layermask', 'stbte_offset_tileinfo_category_id',
+          'stbte_offset_ui_tool', 'stbte_offset_ui_has_selection',
+          'stbte_offset_ui_select_x0', 'stbte_offset_ui_select_y0',
+          'stbte_offset_ui_select_x1', 'stbte_offset_ui_select_y1',
+          'stbte_offset_ui_has_copy', 'stbte_offset_ui_copy_width',
+          'stbte_offset_ui_copy_height', 'stbte_offset_ui_copybuffer',
         ];
-
-        tiles.forEach(tile => {
-          const catPtr = this.stringToPtr(tile.cat);
-          this.exports.stbte_define_tile(this.tilemap, tile.id, tile.mask, catPtr);
+        
+        names.forEach(name => {
+          this.offsets[name.replace('stbte_offset_', '').replace('tilemap_', 'tm_')] = this.exports[name]();
         });
+        
+        this.offsets.sizeof_tilemap = this.exports.stbte_sizeof_tilemap();
+        this.offsets.sizeof_layer = this.exports.stbte_sizeof_layer();
+        this.offsets.sizeof_tileinfo = this.exports.stbte_sizeof_tileinfo();
+        this.offsets.sizeof_ui = this.exports.stbte_sizeof_ui();
+        this.offsets.max_map_x = this.exports.stbte_max_map_x();
+        this.offsets.max_map_y = this.exports.stbte_max_map_y();
+        this.offsets.max_layers = this.exports.stbte_max_layers();
+        
+        console.log('Offsets loaded:', this.offsets);
+      }
 
+      readTilemap(offset, type = 'i32') {
+        const view = new DataView(this.memory.buffer, this.tilemap + offset);
+        switch (type) {
+          case 'i8': return view.getInt8(0);
+          case 'i16': return view.getInt16(0, true);
+          case 'i32': return view.getInt32(0, true);
+          default: return view.getInt32(0, true);
+        }
+      }
+
+      getNumTiles() { return this.readTilemap(this.offsets.tm_num_tiles, 'i32'); }
+      getNumCategories() { return this.readTilemap(this.offsets.tm_num_categories, 'i32'); }
+      getCurrentCategory() { return this.readTilemap(this.offsets.tm_cur_category, 'i32'); }
+      getCurrentTile() { return this.readTilemap(this.offsets.tm_cur_tile, 'i32'); }
+      canUndo() { return this.readTilemap(this.offsets.tm_undo_available, 'i8'); }
+      canRedo() { return this.readTilemap(this.offsets.tm_redo_available, 'i8'); }
+
+      defineTiles() {
+        const tiles = [
+          { id: 0, mask: 0xFF, cat: 0 }, { id: 1, mask: 0x01, cat: 1 },
+          { id: 2, mask: 0x01, cat: 1 }, { id: 3, mask: 0x01, cat: 1 },
+          { id: 10, mask: 0x02, cat: 2 }, { id: 11, mask: 0x02, cat: 2 },
+          { id: 12, mask: 0x02, cat: 2 }, { id: 20, mask: 0x04, cat: 3 },
+          { id: 21, mask: 0x04, cat: 3 }, { id: 22, mask: 0x04, cat: 3 },
+          { id: 23, mask: 0x04, cat: 3 },
+        ];
+        tiles.forEach(t => this.exports.stbte_define_tile(this.tilemap, t.id, t.mask, t.cat));
         log(`Defined ${tiles.length} tiles`);
       }
 
-      stringToPtr(str) {
-        const encoder = new TextEncoder();
-        const bytes = encoder.encode(str + '\0');
-        const ptr = this.exports.malloc(bytes.length);
-        const mem = new Uint8Array(this.memory.buffer, ptr, bytes.length);
-        mem.set(bytes);
-        return ptr;
-      }
-
-      ptrToString(ptr) {
-        const mem = new Uint8Array(this.memory.buffer);
-        let str = '';
-        while (mem[ptr] !== 0) {
-          str += String.fromCharCode(mem[ptr++]);
-        }
-        return str;
-      }
-
       setupUI() {
-        // Tools
         document.querySelectorAll('.tool-btn').forEach(btn => {
           btn.addEventListener('click', () => {
             document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
@@ -319,33 +330,30 @@
           });
         });
 
-        // Undo/Redo
         document.getElementById('undo-btn').addEventListener('click', () => {
           this.exports.stbte_undo(this.tilemap);
           this.render();
           log('Undo');
         });
-
+        
         document.getElementById('redo-btn').addEventListener('click', () => {
           this.exports.stbte_redo(this.tilemap);
           this.render();
           log('Redo');
         });
 
-        // Cut/Copy/Paste
         document.getElementById('cut-btn').addEventListener('click', () => {
           this.exports.stbte_cut(this.tilemap);
           this.render();
-          log('Cut selection');
+          log('Cut');
         });
-
+        
         document.getElementById('copy-btn').addEventListener('click', () => {
           this.exports.stbte_copy(this.tilemap);
-          log('Copy selection');
+          log('Copy');
         });
-
+        
         document.getElementById('paste-btn').addEventListener('click', () => {
-          // Paste at center of map
           const cx = Math.floor(this.mapWidth / 2);
           const cy = Math.floor(this.mapHeight / 2);
           this.exports.stbte_paste(this.tilemap, cx, cy);
@@ -353,64 +361,48 @@
           log(`Paste at ${cx},${cy}`);
         });
 
-        // Clear
         document.getElementById('clear-btn').addEventListener('click', () => {
           this.exports.stbte_clear(this.tilemap);
           this.render();
-          log('Map cleared');
+          log('Cleared');
         });
 
-        // Grid toggle
         document.getElementById('grid-btn').addEventListener('click', () => {
           this.showGrid = !this.showGrid;
           this.render();
         });
 
-        // Canvas interaction
         const canvas = document.getElementById('tilemap');
         let isDragging = false;
-        let dragStart = null;
 
         canvas.addEventListener('mousedown', (e) => {
           const rect = canvas.getBoundingClientRect();
           const x = Math.floor((e.clientX - rect.left) / this.tileSize);
           const y = Math.floor((e.clientY - rect.top) / this.tileSize);
-
+          
           if (x >= 0 && x < this.mapWidth && y >= 0 && y < this.mapHeight) {
             isDragging = true;
-            dragStart = {x, y};
-
-            const button = e.button === 2 ? 1 : 0; // Right click = erase
-            this.exports.stbte_set_tool(this.tilemap, this.currentTool);
+            const button = e.button === 2 ? 1 : 0;
             this.exports.stbte_click_tile(this.tilemap, x, y, button);
             this.render();
-            log(`Click at ${x},${y} (button: ${button})`);
+            log(`Click ${x},${y}`);
           }
         });
 
         canvas.addEventListener('mousemove', (e) => {
           if (!isDragging) return;
-
           const rect = canvas.getBoundingClientRect();
           const x = Math.floor((e.clientX - rect.left) / this.tileSize);
           const y = Math.floor((e.clientY - rect.top) / this.tileSize);
-
-          if (x >= 0 && x < this.mapWidth && y >= 0 && y < this.mapHeight) {
-            // For brush tool, paint while dragging
-            if (this.currentTool === 1) {
-              const button = e.button === 2 ? 1 : 0;
-              this.exports.stbte_click_tile(this.tilemap, x, y, button);
-              this.render();
-            }
+          
+          if (x >= 0 && x < this.mapWidth && y >= 0 && y < this.mapHeight && this.currentTool === 1) {
+            this.exports.stbte_click_tile(this.tilemap, x, y, 0);
+            this.render();
           }
         });
 
-        canvas.addEventListener('mouseup', () => {
-          isDragging = false;
-          dragStart = null;
-        });
-
-        canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+        canvas.addEventListener('mouseup', () => isDragging = false);
+        canvas.addEventListener('contextmenu', e => e.preventDefault());
 
         this.setupLayers();
         this.setupCategories();
@@ -420,47 +412,125 @@
       setupLayers() {
         const container = document.getElementById('layers');
         container.innerHTML = '';
-
-        for (let i = 0; i < this.layers; i++) {
-          const btn = document.createElement('button');
-          btn.className = 'layer-btn' + (i === this.selectedLayer ? ' active' : '');
-          btn.textContent = `Layer ${i + 1}`;
-          btn.addEventListener('click', () => {
+        container.style.display = 'flex';
+        container.style.flexDirection = 'column';
+        container.style.gap = '5px';
+        
+        for (let i = this.layers - 1; i >= 0; i--) { // Show top layer first
+          const layerRow = document.createElement('div');
+          layerRow.style.display = 'flex';
+          layerRow.style.alignItems = 'center';
+          layerRow.style.gap = '5px';
+          layerRow.style.padding = '5px';
+          layerRow.style.background = i === this.selectedLayer ? '#484' : '#333';
+          layerRow.style.borderRadius = '3px';
+          layerRow.style.cursor = 'pointer';
+          
+          // Layer name (click to select)
+          const nameSpan = document.createElement('span');
+          nameSpan.textContent = this.layerNames[i] || `Layer ${i + 1}`;
+          nameSpan.style.flex = '1';
+          nameSpan.style.fontWeight = i === this.selectedLayer ? 'bold' : 'normal';
+          nameSpan.addEventListener('click', () => {
             this.selectedLayer = this.selectedLayer === i ? -1 : i;
             this.exports.stbte_set_active_layer(this.tilemap, this.selectedLayer);
             this.setupLayers();
-            log(`Active layer: ${this.selectedLayer}`);
+            log(`Layer: ${this.selectedLayer}`);
           });
-          container.appendChild(btn);
+          layerRow.appendChild(nameSpan);
+          
+          // Read layer state from memory
+          const layerOffset = this.offsets.tm_layerinfo + (i * this.offsets.sizeof_layer);
+          const hidden = new DataView(this.memory.buffer, layerOffset + this.offsets.layer_hidden, 1).getInt8(0);
+          const locked = new DataView(this.memory.buffer, layerOffset + this.offsets.layer_locked, 1).getInt8(0);
+          const soloLayer = this.readTilemap(this.offsets.tm_solo_layer, 'i32');
+          const isSolo = soloLayer === i;
+          
+          // Debug log current state
+          log(`Layer ${i}: hidden=${hidden}, locked=${locked}, solo=${isSolo}`);
+          
+          // Toggle buttons
+          const toggles = [
+            { label: 'H', title: 'Hidden', state: hidden, action: () => {
+              const newHidden = hidden ? 0 : 1;
+              log(`Setting layer ${i} hidden to ${newHidden}`);
+              this.exports.stbte_set_layer_hidden(this.tilemap, i, newHidden);
+              // Verify it was set
+              const verifyHidden = new DataView(this.memory.buffer, layerOffset + this.offsets.layer_hidden, 1).getInt8(0);
+              log(`Verified hidden=${verifyHidden}`);
+              this.setupLayers();
+              this.render();
+            }},
+            { label: locked === 0 ? 'U' : locked === 1 ? 'P' : 'L', title: locked === 0 ? 'Unlocked' : locked === 1 ? 'Protected' : 'Locked', state: locked > 0, action: () => {
+              const newLocked = (locked + 1) % 3;
+              this.exports.stbte_set_layer_locked(this.tilemap, i, newLocked);
+              this.setupLayers();
+              this.render();
+              log(`Layer ${i} locked: ${newLocked === 0 ? 'Unlocked' : newLocked === 1 ? 'Protected' : 'Locked'}`);
+            }},
+            { label: 'S', title: 'Solo', state: isSolo, action: () => {
+              const newSolo = isSolo ? -1 : i;
+              this.exports.stbte_set_solo_layer(this.tilemap, newSolo);
+              this.setupLayers();
+              this.render();
+              log(`Solo layer: ${newSolo}`);
+            }}
+          ];
+          
+          toggles.forEach(toggle => {
+            const btn = document.createElement('button');
+            btn.textContent = toggle.label;
+            btn.title = toggle.title;
+            btn.style.minWidth = '30px';
+            btn.style.padding = '2px 5px';
+            btn.style.fontSize = '10px';
+            btn.style.background = toggle.state ? '#8f8' : '#555';
+            btn.style.color = toggle.state ? '#000' : '#fff';
+            btn.style.border = '1px solid #666';
+            btn.style.borderRadius = '2px';
+            btn.style.cursor = 'pointer';
+            btn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              toggle.action();
+            });
+            layerRow.appendChild(btn);
+          });
+          
+          container.appendChild(layerRow);
         }
       }
 
       setupCategories() {
         const container = document.getElementById('categories');
         container.innerHTML = '';
-
-        const catCount = this.exports.stbte_get_category_count(this.tilemap);
-        log(`Categories: ${catCount}`);
-
-        // Add "All" tab
+        
+        // Force category computation by calling set_active_category
+        this.exports.stbte_set_active_category(this.tilemap, this.selectedCategory);
+        
+        const catCount = this.getNumCategories();
+        log(`Setting up ${catCount} categories`);
+        
+        // Always show "All" tab
         const allTab = document.createElement('div');
-        allTab.className = 'category-tab active';
-        allTab.textContent = 'All';
+        allTab.className = 'category-tab' + (this.selectedCategory === -1 ? ' active' : '');
+        allTab.textContent = this.categoryNames[0] || 'All';
         allTab.addEventListener('click', () => {
+          this.selectedCategory = -1;
           this.exports.stbte_set_active_category(this.tilemap, -1);
           this.setupCategories();
           this.setupTiles();
         });
         container.appendChild(allTab);
-
+        
+        // Show all computed categories
         for (let i = 0; i < catCount; i++) {
-          const catPtr = this.exports.stbte_get_category_name(this.tilemap, i);
-          const catName = this.ptrToString(catPtr);
-
           const tab = document.createElement('div');
-          tab.className = 'category-tab';
+          tab.className = 'category-tab' + (this.selectedCategory === i ? ' active' : '');
+          // Use frontend name array, fallback to "Cat N"
+          const catName = this.categoryNames[i + 1] || `Cat ${i}`;
           tab.textContent = catName;
           tab.addEventListener('click', () => {
+            this.selectedCategory = i;
             this.exports.stbte_set_active_category(this.tilemap, i);
             this.setupCategories();
             this.setupTiles();
@@ -472,107 +542,107 @@
       setupTiles() {
         const container = document.getElementById('tiles');
         container.innerHTML = '';
-
-        const tileCount = this.exports.stbte_get_tile_count(this.tilemap);
-        const activeCat = this.exports.stbte_get_active_category(this.tilemap);
-
+        const tileCount = this.getNumTiles();
+        const activeCat = this.getCurrentCategory();
+        
+        // Debug logging
+        log(`setupTiles: tileCount=${tileCount}, activeCat=${activeCat}`);
+        log(`tm_tiles offset: ${this.offsets.tm_tiles}`);
+        
+        const tilesPtr = this.readTilemap(this.offsets.tm_tiles, 'i32');
+        log(`tilesPtr: 0x${tilesPtr.toString(16)}`);
+        
+        const currentTileIdx = this.getCurrentTile();
+        
+        let visibleCount = 0;
         for (let i = 0; i < tileCount; i++) {
-          const tileId = this.exports.stbte_get_tile_id(this.tilemap, i);
-          const tileCat = this.exports.stbte_get_tile_category_id(this.tilemap, i);
-
-          // Filter by category
+          const tileBase = tilesPtr + (i * this.offsets.sizeof_tileinfo);
+          const tileId = new DataView(this.memory.buffer, tileBase + this.offsets.tileinfo_id, 2).getUint16(0, true);
+          const tileCat = new DataView(this.memory.buffer, tileBase + this.offsets.tileinfo_category_id, 2).getUint16(0, true);
+          
           if (activeCat !== -1 && tileCat !== activeCat) continue;
-
+          
+          visibleCount++;
           const btn = document.createElement('div');
-          btn.className = 'tile-btn' + (i === this.selectedTile ? ' active' : '');
+          btn.className = 'tile-btn' + (i === currentTileIdx ? ' active' : '');
           btn.textContent = tileId;
-          btn.addEventListener('click', () => {
-            this.selectedTile = i;
-            this.exports.stbte_set_active_tile(this.tilemap, i);
-            this.setupTiles();
-            log(`Selected tile: ${tileId}`);
-          });
+          
+          // Capture the actual tile index in a closure
+          ((tileIndex, tileID) => {
+            btn.addEventListener('click', () => {
+              this.exports.stbte_set_active_tile(this.tilemap, tileIndex);
+              this.setupTiles();
+              log(`Selected tile index: ${tileIndex}, ID: ${tileID}`);
+            });
+          })(i, tileId);
+          
           container.appendChild(btn);
         }
+        
+        log(`setupTiles: visibleCount=${visibleCount}`);
       }
 
       render() {
         const canvas = document.getElementById('tilemap');
         const ctx = canvas.getContext('2d');
-
-        // Clear
         ctx.fillStyle = '#000';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        // Get tile data pointer
-        const dataPtr = this.exports.stbte_get_map_data_ptr(this.tilemap);
-        const data = new Int16Array(this.memory.buffer, dataPtr, this.mapWidth * this.mapHeight * this.layers);
-
-        // Render tiles (simple colored squares for demo)
+        
+        // tm_data is offset 0, data is embedded in struct at tilemap pointer
+        // Important: data is stored as [MAX_Y][MAX_X][MAX_LAYERS], not [mapHeight][mapWidth][layers]
+        const dataOffset = this.tilemap + this.offsets.tm_data;
+        const maxX = this.offsets.max_map_x;  // 512
+        const maxLayers = this.offsets.max_layers;  // 8
+        
+        // Get solo layer state (-1 means no solo)
+        const soloLayer = this.readTilemap(this.offsets.tm_solo_layer, 'i32');
+        
         for (let y = 0; y < this.mapHeight; y++) {
           for (let x = 0; x < this.mapWidth; x++) {
             const px = x * this.tileSize;
             const py = y * this.tileSize;
-
-            // Draw background
             ctx.fillStyle = '#1a1a1a';
             ctx.fillRect(px, py, this.tileSize, this.tileSize);
-
-            // Draw tiles from all layers
+            
             for (let l = 0; l < this.layers; l++) {
-              const idx = (y * this.mapWidth + x) * this.layers + l;
-              const tileId = data[idx];
-
+              // Check if layer is hidden
+              const layerOffset = this.offsets.tm_layerinfo + (l * this.offsets.sizeof_layer);
+              const hidden = new DataView(this.memory.buffer, layerOffset + this.offsets.layer_hidden, 1).getInt8(0);
+              
+              // Skip hidden layers
+              if (hidden) continue;
+              
+              // If solo layer is set, only show that layer
+              if (soloLayer >= 0 && l !== soloLayer) continue;
+              
+              // Index into the MAX-sized array: (y * MAX_X + x) * MAX_LAYERS + layer
+              const idx = (y * maxX + x) * maxLayers + l;
+              const tileId = new Int16Array(this.memory.buffer, dataOffset + idx * 2, 1)[0];
               if (tileId >= 0) {
-                // Simple color based on tile ID
-                const hue = (tileId * 37) % 360;
-                ctx.fillStyle = `hsl(${hue}, 60%, 50%)`;
+                ctx.fillStyle = `hsl(${(tileId * 37) % 360}, 60%, 50%)`;
                 ctx.fillRect(px + 2, py + 2, this.tileSize - 4, this.tileSize - 4);
-
-                // Draw tile ID
                 ctx.fillStyle = '#fff';
                 ctx.font = '10px monospace';
                 ctx.textAlign = 'center';
-                ctx.fillText(tileId.toString(), px + this.tileSize / 2, py + this.tileSize / 2 + 4);
+                ctx.fillText(tileId.toString(), px + this.tileSize/2, py + this.tileSize/2 + 4);
               }
             }
-
-            // Grid
+            
             if (this.showGrid) {
               ctx.strokeStyle = '#333';
               ctx.strokeRect(px, py, this.tileSize, this.tileSize);
             }
           }
         }
-
-        // Draw selection if exists
-        const hasSel = this.exports.stbte_has_selection(this.tilemap);
-        if (hasSel) {
-          const selPtr = this.exports.malloc(16);
-          this.exports.stbte_get_selection(this.tilemap, selPtr, selPtr + 4, selPtr + 8, selPtr + 12);
-          const sel = new Int32Array(this.memory.buffer, selPtr, 4);
-          const [x0, y0, x1, y1] = [sel[0], sel[1], sel[2], sel[3]];
-
-          ctx.strokeStyle = '#8f8';
-          ctx.lineWidth = 2;
-          ctx.strokeRect(
-            x0 * this.tileSize,
-            y0 * this.tileSize,
-            (x1 - x0 + 1) * this.tileSize,
-            (y1 - y0 + 1) * this.tileSize
-          );
-        }
       }
     }
 
-    // Logger
     function log(msg) {
       const output = document.getElementById('output');
       output.textContent += msg + '\n';
       output.scrollTop = output.scrollHeight;
     }
 
-    // Initialize
     const editor = new STBTileEditor();
     editor.init().catch(err => {
       log('Error: ' + err.message);
@@ -580,5 +650,4 @@
     });
   </script>
 </body>
-
 </html>
