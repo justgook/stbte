@@ -1,15 +1,9 @@
 /* ==========================================================================
- * stb_tilemap_editor WASM Plugin
+ * stb_tilemap_editor Headless WASM API
  *
- * Wraps Sean Barrett's stb_tilemap_editor.h as a WASM module that
- * communicates with the host via shared memory command/event buffers.
- *
- * Architecture:
- *   - WASM runs in a dedicated Web Worker
- *   - Draw commands (STBTE_DRAW_RECT/TILE) append to a command buffer
- *   - Mouse/keyboard events arrive via an event ring buffer
- *   - Double-buffered command output for lock-free rendering
- *   - All buffers live in WASM linear memory (SharedArrayBuffer)
+ * Wraps Sean Barrett's stb_tilemap_editor.h as a headless WASM module.
+ * All state is exposed via pointers for direct memory access from JS.
+ * No properties or links - handled externally.
  *
  * Build: zig build-exe main.c -target wasm32-freestanding -fno-entry
  *        -rdynamic -O ReleaseFast -femit-bin=stb_tilemap_editor.wasm
@@ -21,21 +15,14 @@
 
 /* ==========================================================================
  * 1. FREESTANDING LIBC STUBS
- *
- * stb_tilemap_editor.h needs malloc (once), sprintf (for UI numbers),
- * and assert. We provide minimal implementations.
  * ========================================================================== */
 
-/* ---- Memory ---- */
-
-/* Simple bump allocator. stb_tilemap_editor only calls malloc() once in
- * stbte_create_map(), so we just need a single large allocation. */
-static uint8_t heap_storage[8 * 1024 * 1024]
-    __attribute__((aligned(16))); /* 8 MB heap */
+static uint8_t heap_storage[16 * 1024 * 1024]
+    __attribute__((aligned(16)));
 static uint32_t heap_offset = 0;
 
+__attribute__((export_name("malloc")))
 void *malloc(size_t size) {
-  /* Align to 16 bytes */
   uint32_t aligned = (heap_offset + 15) & ~15u;
   if (aligned + size > sizeof(heap_storage))
     return (void *)0;
@@ -44,9 +31,8 @@ void *malloc(size_t size) {
   return ptr;
 }
 
-void free(void *ptr) { (void)ptr; /* no-op: stb never frees */ }
-
-/* ---- String utilities ---- */
+__attribute__((export_name("free")))
+void free(void *ptr) { (void)ptr; }
 
 static void *memset(void *dest, int c, size_t n) {
   uint8_t *d = (uint8_t *)dest;
@@ -65,211 +51,56 @@ static void *memcpy(void *dest, const void *src, size_t n) {
 
 static size_t strlen(const char *s) {
   size_t len = 0;
-  while (s[len])
-    len++;
+  while (s[len]) len++;
   return len;
 }
 
-/* ---- sprintf via stb_sprintf ---- */
-/* Use Sean Barrett's full sprintf implementation instead of a hand-rolled
- * subset. STB_SPRINTF_STATIC makes all functions static to avoid WASM
- * export conflicts. */
 #define STB_SPRINTF_STATIC
 #define STB_SPRINTF_IMPLEMENTATION
 #include "stb_sprintf.h"
-
-/* Map bare sprintf to stbsp_sprintf so stb_tilemap_editor.h's
- * stbte__sprintf macro (which expands to sprintf) resolves correctly. */
 #define sprintf stbsp_sprintf
 
-/* ---- Assert ---- */
 #define STBTE_ASSERT(x) ((void)0)
-
-/* assert function for stb's #include <assert.h> */
 #define assert(x) ((void)0)
 
 /* ==========================================================================
- * 2. COMMAND BUFFER SYSTEM
- *
- * Draw commands are appended to a fixed-size buffer during stbte_draw().
- * The host reads this buffer to replay drawing on Canvas2D.
+ * 2. STB TILEMAP EDITOR CONFIGURATION
  * ========================================================================== */
 
-/* Command types */
-#define CMD_RECT 1
-#define CMD_TILE 2
-#define CMD_END 0
+// Disable properties and links - handled externally
+#define STBTE_MAX_PROPERTIES 0
+#undef STBTE_ALLOW_LINK
 
-/* Command buffer: array of uint32_t values.
- * CMD_RECT: [CMD_RECT, x0|y0<<16, x1|y1<<16, color]   = 4 words (packed coords)
- * CMD_TILE: [CMD_TILE, x0|y0<<16, tile_id, highlight]  = 4 words (packed
- * coords) CMD_END:  [CMD_END]                                   = 1 word
- * (sentinel)
- */
-
-#define CMD_BUF_WORDS (64 * 1024) /* 256 KB per buffer */
-static uint32_t cmd_buf_a[CMD_BUF_WORDS];
-static uint32_t cmd_buf_b[CMD_BUF_WORDS];
-static uint32_t cmd_count_a = 0;
-static uint32_t cmd_count_b = 0;
-
-/* Which buffer is currently being written to (0=A, 1=B) */
-static uint32_t active_write_buf = 0;
-
-static uint32_t *cmd_current_buf(void) {
-  return active_write_buf == 0 ? cmd_buf_a : cmd_buf_b;
-}
-
-static uint32_t *cmd_current_count(void) {
-  return active_write_buf == 0 ? &cmd_count_a : &cmd_count_b;
-}
-
-static void cmd_reset(void) { *cmd_current_count() = 0; }
-
-static void cmd_push_rect(int x0, int y0, int x1, int y1, unsigned int color) {
-  uint32_t *count = cmd_current_count();
-  uint32_t *buf = cmd_current_buf();
-  if (*count + 6 >= CMD_BUF_WORDS)
-    return; /* overflow protection */
-  uint32_t i = *count;
-  buf[i + 0] = CMD_RECT;
-  buf[i + 1] = (uint32_t)(x0 & 0xFFFF) | ((uint32_t)(y0 & 0xFFFF) << 16);
-  buf[i + 2] = (uint32_t)(x1 & 0xFFFF) | ((uint32_t)(y1 & 0xFFFF) << 16);
-  buf[i + 3] = color;
-  *count = i + 4;
-}
-
-/* Tile ID fixup table: maps palette slot -> real tile ID.
- * Populated after stb_tilemap_editor.h is included and tiles are defined.
- * Used to convert imgui hit-test IDs to real tile IDs in DRAW_TILE. */
-#define MAX_TILE_SLOTS 1024
-static uint16_t tile_slot_to_id[MAX_TILE_SLOTS];
-static int tile_slot_count = 0;
-
-static const char *category_names[] = {
-  "default",
-  "terrain",
-  "objects",
-  "floor",
-  "walls_low",
-  "walls_high"
-};
-#define CATEGORY_COUNT (sizeof(category_names)/sizeof(category_names[0]))
-
-static void cmd_push_tile(int x0, int y0, unsigned short id, int highlight,
-                          float *data) {
-  uint32_t *count = cmd_current_count();
-  uint32_t *buf = cmd_current_buf();
-  if (*count + 5 >= CMD_BUF_WORDS)
-    return; /* overflow protection */
-
-  /* stb_tilemap_editor passes imgui hit-test IDs for palette tiles instead
-   * of the real tile ID. The palette ID has the form: STBTE__palette + (slot <<
-   * 7) where STBTE__palette = 7. We detect this and convert to the real tile
-   * ID. */
-  uint32_t real_id = (uint32_t)id;
-  if (data == NULL && (id & 0x7F) == 7) {
-    /* Palette tile: decode slot and look up real tile ID */
-    int slot = (id - 7) >> 7;
-    if (slot >= 0 && slot < tile_slot_count) {
-      real_id = (uint32_t)tile_slot_to_id[slot];
-    }
-  }
-
-  uint32_t i = *count;
-  buf[i + 0] = CMD_TILE;
-  buf[i + 1] = (uint32_t)(x0 & 0xFFFF) | ((uint32_t)(y0 & 0xFFFF) << 16);
-  buf[i + 2] = real_id;
-  buf[i + 3] = (uint32_t)(highlight + 1); /* shift: -1->0, 0->1, 1->2 */
-  (void)data;                             /* TODO phase 2: pass property data */
-  *count = i + 4;
-}
-
-/* ==========================================================================
- * 3. EVENT RING BUFFER
- *
- * The host writes mouse/keyboard events here; WASM reads them in frame().
- * Ring buffer with head/tail pointers (Atomics-compatible uint32 values).
- * ========================================================================== */
-
-/* Event types */
-#define EVT_MOUSE_MOVE 1   /* x, y, shifted, scrollkey */
-#define EVT_MOUSE_BUTTON 2 /* x, y, right, down, shifted, scrollkey */
-#define EVT_MOUSE_WHEEL 3  /* x, y, vscroll */
-#define EVT_ACTION 4       /* action_id */
-#define EVT_RESIZE 5       /* x0, y0, x1, y1 */
-
-#define EVT_BUF_WORDS (4 * 1024) /* 16 KB ring buffer */
-static uint32_t evt_buf[EVT_BUF_WORDS];
-static volatile uint32_t evt_head = 0; /* written by host */
-static volatile uint32_t evt_tail = 0; /* read by WASM */
-
-/* ==========================================================================
- * 4. CONTROL BLOCK
- *
- * Shared state between host and WASM, laid out for Atomics access.
- * ========================================================================== */
-
-typedef struct {
-  volatile uint32_t active_read_buf; /* 0: read A, 1: read B */
-  volatile uint32_t cmd_count_a;
-  volatile uint32_t cmd_count_b;
-  volatile uint32_t evt_head;      /* mirror of evt_head for Atomics */
-  volatile uint32_t evt_tail;      /* mirror of evt_tail for Atomics */
-  volatile uint32_t frame_ready;   /* 1 when a new frame is available */
-  volatile uint32_t editor_width;  /* current display width */
-  volatile uint32_t editor_height; /* current display height */
-  volatile uint32_t initialized;   /* 1 after init() succeeds */
-  volatile uint32_t map_width;
-  volatile uint32_t map_height;
-  volatile uint32_t num_layers;
-  volatile uint32_t spacing_x;
-  volatile uint32_t spacing_y;
-  volatile uint32_t padding[2]; /* align to 64 bytes */
-} control_block_t;
-
-static control_block_t control_block;
-
-/* ==========================================================================
- * 5. STB TILEMAP EDITOR CONFIGURATION AND INCLUSION
- * ========================================================================== */
-
-/* Configurable via compile-time defines, with sensible defaults */
+// Default limits (can be overridden at compile time)
 #ifndef STBTE_MAX_TILEMAP_X
-#define STBTE_MAX_TILEMAP_X 200
+#define STBTE_MAX_TILEMAP_X 512
 #endif
 
 #ifndef STBTE_MAX_TILEMAP_Y
-#define STBTE_MAX_TILEMAP_Y 200
+#define STBTE_MAX_TILEMAP_Y 512
 #endif
 
 #ifndef STBTE_MAX_LAYERS
 #define STBTE_MAX_LAYERS 8
 #endif
 
-#ifndef STBTE_UNDO_BUFFER_BYTES
-#define STBTE_UNDO_BUFFER_BYTES (1 << 22) /* 4 MB */
-#endif
-
-#ifndef STBTE_MAX_PROPERTIES
-#define STBTE_MAX_PROPERTIES 10
-#endif
-
 #ifndef STBTE_MAX_CATEGORIES
 #define STBTE_MAX_CATEGORIES 100
 #endif
 
-#ifndef STBTE_MAX_COPY
-#define STBTE_MAX_COPY 16384 /* ~128x128 */
+#ifndef STBTE_UNDO_BUFFER_BYTES
+#define STBTE_UNDO_BUFFER_BYTES (1 << 22)
 #endif
 
-/* Wire draw callbacks to our command buffer */
-#define STBTE_DRAW_RECT(x0, y0, x1, y1, color)                                 \
-  cmd_push_rect(x0, y0, x1, y1, color)
-#define STBTE_DRAW_TILE(x0, y0, id, highlight, data)                           \
-  cmd_push_tile(x0, y0, id, highlight, data)
+#ifndef STBTE_MAX_COPY
+#define STBTE_MAX_COPY 65536
+#endif
 
-/* Prevent stb from including stdlib/stdio (we're freestanding) */
+// Stub out draw callbacks (not used in headless mode)
+#define STBTE_DRAW_RECT(x0, y0, x1, y1, color) ((void)0)
+#define STBTE_DRAW_TILE(x0, y0, id, highlight, data) ((void)0)
+
+// Prevent stdlib includes
 #ifdef _WIN32
 #undef _WIN32
 #endif
@@ -278,268 +109,637 @@ static control_block_t control_block;
 #include "stb_tilemap_editor.h"
 
 /* ==========================================================================
- * 6. EDITOR STATE
+ * 3. EXPORTED STRUCTURES (for direct memory access)
  * ========================================================================== */
 
-static stbte_tilemap *tilemap = NULL;
-static float last_frame_time = 0.0f;
-static int display_set = 0;
+// Tool enum for reference
+typedef enum {
+  STBTE_TOOL_SELECT = 0,
+  STBTE_TOOL_BRUSH = 1,
+  STBTE_TOOL_ERASE = 2,
+  STBTE_TOOL_RECTANGLE = 3,
+  STBTE_TOOL_EYEDROPPER = 4,
+  STBTE_TOOL_FILL = 5,
+  STBTE_TOOL_LINK = 6,
+} stbte_tool_t;
+
+// Layer state
+typedef struct {
+  const char *name;
+  int locked;    // 0=unlocked, 1=protected, 2=locked
+  int hidden;
+  int solo;
+} stbte_layer_state_t;
+
+// Tile info (read-only from JS)
+typedef struct {
+  unsigned short id;
+  unsigned int layermask;
+  const char *category;
+  int category_id;
+} stbte_tile_info_t;
+
+// Clipboard info
+typedef struct {
+  int has_copy;
+  int width;
+  int height;
+  int src_x;
+  int src_y;
+} stbte_clipboard_info_t;
+
+// Selection info
+typedef struct {
+  int has_selection;
+  int x0, y0, x1, y1;
+} stbte_selection_info_t;
 
 /* ==========================================================================
- * 7. EVENT PROCESSING
- *
- * Read events from the ring buffer and forward them to stb.
+ * 4. INTERNAL STATE ACCESS HELPERS
  * ========================================================================== */
 
-static void process_events(void) {
-  if (tilemap == NULL)
+// Access internal UI state
+static stbte__ui_t* get_ui(void) {
+  return &stbte__ui;
+}
+
+// Convert internal tool enum to our tool enum
+static int tool_from_internal(int internal_tool) {
+  switch (internal_tool) {
+    case STBTE__tool_select: return STBTE_TOOL_SELECT;
+    case STBTE__tool_brush: return STBTE_TOOL_BRUSH;
+    case STBTE__tool_erase: return STBTE_TOOL_ERASE;
+    case STBTE__tool_rect: return STBTE_TOOL_RECTANGLE;
+    case STBTE__tool_eyedrop: return STBTE_TOOL_EYEDROPPER;
+    case STBTE__tool_fill: return STBTE_TOOL_FILL;
+    case STBTE__tool_link: return STBTE_TOOL_LINK;
+    default: return STBTE_TOOL_BRUSH;
+  }
+}
+
+static int tool_to_internal(int tool) {
+  switch (tool) {
+    case STBTE_TOOL_SELECT: return STBTE__tool_select;
+    case STBTE_TOOL_BRUSH: return STBTE__tool_brush;
+    case STBTE_TOOL_ERASE: return STBTE__tool_erase;
+    case STBTE_TOOL_RECTANGLE: return STBTE__tool_rect;
+    case STBTE_TOOL_EYEDROPPER: return STBTE__tool_eyedrop;
+    case STBTE_TOOL_FILL: return STBTE__tool_fill;
+    case STBTE_TOOL_LINK: return STBTE__tool_link;
+    default: return STBTE__tool_brush;
+  }
+}
+
+/* ==========================================================================
+ * 5. TILEMAP LIFECYCLE
+ * ========================================================================== */
+
+__attribute__((export_name("stbte_create"))) 
+stbte_tilemap* stbte_create(int map_x, int map_y, int layers, int spacing_x, int spacing_y, int max_tiles) {
+  if (!stbte__ui.initted) {
+    stbte__init_gui();
+  }
+  return stbte_create_map(map_x, map_y, layers, spacing_x, spacing_y, max_tiles);
+}
+
+__attribute__((export_name("stbte_destroy"))) 
+void stbte_destroy(stbte_tilemap* tm) {
+  // stbte doesn't have a destroy function - just let it leak for now
+  (void)tm;
+}
+
+__attribute__((export_name("stbte_clear"))) 
+void stbte_clear(stbte_tilemap* tm) {
+  stbte_clear_map(tm);
+}
+
+__attribute__((export_name("stbte_set_dimensions"))) 
+void stbte_set_dims(stbte_tilemap* tm, int max_x, int max_y) {
+  stbte_set_dimensions(tm, max_x, max_y);
+}
+
+__attribute__((export_name("stbte_get_dimensions"))) 
+void stbte_get_dims(stbte_tilemap* tm, int* max_x, int* max_y) {
+  stbte_get_dimensions(tm, max_x, max_y);
+}
+
+__attribute__((export_name("stbte_set_spacing"))) 
+void stbte_set_space(stbte_tilemap* tm, int spacing_x, int spacing_y) {
+  stbte_set_spacing(tm, spacing_x, spacing_y, spacing_x + 1, spacing_y + 1);
+}
+
+/* ==========================================================================
+ * 6. TOOL MANAGEMENT
+ * ========================================================================== */
+
+__attribute__((export_name("stbte_set_tool"))) 
+void stbte_set_current_tool(stbte_tilemap* tm, int tool) {
+  (void)tm;
+  stbte__ui.tool = tool_to_internal(tool);
+  stbte__ui.has_selection = 0;
+}
+
+__attribute__((export_name("stbte_get_tool"))) 
+int stbte_get_current_tool(stbte_tilemap* tm) {
+  (void)tm;
+  return tool_from_internal(stbte__ui.tool);
+}
+
+/* ==========================================================================
+ * 7. ACTIVE TILE (BRUSH)
+ * ========================================================================== */
+
+__attribute__((export_name("stbte_set_active_tile"))) 
+void stbte_set_brush_tile(stbte_tilemap* tm, int tile_index) {
+  if (tile_index >= 0 && tile_index < tm->num_tiles) {
+    tm->cur_tile = tile_index;
+  }
+}
+
+__attribute__((export_name("stbte_get_active_tile"))) 
+int stbte_get_brush_tile(stbte_tilemap* tm) {
+  return tm->cur_tile;
+}
+
+/* ==========================================================================
+ * 8. LAYER MANAGEMENT
+ * ========================================================================== */
+
+__attribute__((export_name("stbte_get_layer_count"))) 
+int stbte_get_num_layers(stbte_tilemap* tm) {
+  return tm->num_layers;
+}
+
+__attribute__((export_name("stbte_set_layer_name"))) 
+void stbte_set_layername_wrapper(stbte_tilemap* tm, int layer, const char* name) {
+  stbte_set_layername(tm, layer, name);
+}
+
+__attribute__((export_name("stbte_get_layer_name"))) 
+const char* stbte_get_layername(stbte_tilemap* tm, int layer) {
+  if (layer >= 0 && layer < tm->num_layers) {
+    return tm->layerinfo[layer].name;
+  }
+  return NULL;
+}
+
+__attribute__((export_name("stbte_set_layer_hidden"))) 
+void stbte_set_layer_hide(stbte_tilemap* tm, int layer, int hidden) {
+  if (layer >= 0 && layer < tm->num_layers) {
+    tm->layerinfo[layer].hidden = hidden ? 1 : 0;
+  }
+}
+
+__attribute__((export_name("stbte_get_layer_hidden"))) 
+int stbte_get_layer_hide(stbte_tilemap* tm, int layer) {
+  if (layer >= 0 && layer < tm->num_layers) {
+    return tm->layerinfo[layer].hidden;
+  }
+  return 0;
+}
+
+__attribute__((export_name("stbte_set_layer_locked"))) 
+void stbte_set_layer_lock(stbte_tilemap* tm, int layer, int locked) {
+  if (layer >= 0 && layer < tm->num_layers) {
+    tm->layerinfo[layer].locked = locked % 3; // 0=unlocked, 1=protected, 2=locked
+  }
+}
+
+__attribute__((export_name("stbte_get_layer_locked"))) 
+int stbte_get_layer_lock(stbte_tilemap* tm, int layer) {
+  if (layer >= 0 && layer < tm->num_layers) {
+    return tm->layerinfo[layer].locked;
+  }
+  return 0;
+}
+
+__attribute__((export_name("stbte_set_active_layer"))) 
+void stbte_set_cur_layer(stbte_tilemap* tm, int layer) {
+  tm->cur_layer = layer;
+}
+
+__attribute__((export_name("stbte_get_active_layer"))) 
+int stbte_get_cur_layer(stbte_tilemap* tm) {
+  return tm->cur_layer;
+}
+
+__attribute__((export_name("stbte_set_solo_layer"))) 
+void stbte_set_sololayer(stbte_tilemap* tm, int layer) {
+  tm->solo_layer = layer;
+}
+
+__attribute__((export_name("stbte_get_solo_layer"))) 
+int stbte_get_sololayer(stbte_tilemap* tm) {
+  return tm->solo_layer;
+}
+
+/* ==========================================================================
+ * 9. TILE DEFINITIONS
+ * ========================================================================== */
+
+__attribute__((export_name("stbte_define_tile"))) 
+void stbte_add_tile(stbte_tilemap* tm, unsigned short id, unsigned int layermask, const char* category) {
+  stbte_define_tile(tm, id, layermask, category);
+}
+
+__attribute__((export_name("stbte_get_tile_count"))) 
+int stbte_get_num_tiles(stbte_tilemap* tm) {
+  return tm->num_tiles;
+}
+
+__attribute__((export_name("stbte_get_tile_id"))) 
+unsigned short stbte_get_tile_id(stbte_tilemap* tm, int index) {
+  if (index >= 0 && index < tm->num_tiles) {
+    return tm->tiles[index].id;
+  }
+  return 0;
+}
+
+__attribute__((export_name("stbte_get_tile_layermask"))) 
+unsigned int stbte_get_tile_mask(stbte_tilemap* tm, int index) {
+  if (index >= 0 && index < tm->num_tiles) {
+    return tm->tiles[index].layermask;
+  }
+  return 0;
+}
+
+__attribute__((export_name("stbte_get_tile_category"))) 
+const char* stbte_get_tile_cat(stbte_tilemap* tm, int index) {
+  if (index >= 0 && index < tm->num_tiles) {
+    return tm->tiles[index].category;
+  }
+  return NULL;
+}
+
+__attribute__((export_name("stbte_get_tile_category_id"))) 
+int stbte_get_tile_catid(stbte_tilemap* tm, int index) {
+  if (index >= 0 && index < tm->num_tiles) {
+    // Make sure tileinfo is computed
+    if (tm->tileinfo_dirty) {
+      stbte__compute_tileinfo(tm);
+    }
+    return tm->tiles[index].category_id;
+  }
+  return -1;
+}
+
+/* ==========================================================================
+ * 10. CATEGORIES
+ * ========================================================================== */
+
+__attribute__((export_name("stbte_get_category_count"))) 
+int stbte_get_num_categories(stbte_tilemap* tm) {
+  // Make sure tileinfo is computed
+  if (tm->tileinfo_dirty) {
+    stbte__compute_tileinfo(tm);
+  }
+  return tm->num_categories;
+}
+
+__attribute__((export_name("stbte_get_category_name"))) 
+const char* stbte_get_cat_name(stbte_tilemap* tm, int index) {
+  if (index >= 0 && index < tm->num_categories) {
+    return tm->categories[index];
+  }
+  return NULL;
+}
+
+__attribute__((export_name("stbte_set_active_category"))) 
+void stbte_set_cur_category(stbte_tilemap* tm, int category) {
+  stbte__choose_category(tm, category);
+}
+
+__attribute__((export_name("stbte_get_active_category"))) 
+int stbte_get_cur_category(stbte_tilemap* tm) {
+  return tm->cur_category;
+}
+
+/* ==========================================================================
+ * 11. SELECTION
+ * ========================================================================== */
+
+__attribute__((export_name("stbte_set_selection"))) 
+void stbte_set_sel(stbte_tilemap* tm, int x0, int y0, int x1, int y1) {
+  (void)tm;
+  stbte__select_rect(tm, x0, y0, x1, y1);
+}
+
+__attribute__((export_name("stbte_get_selection"))) 
+void stbte_get_sel(stbte_tilemap* tm, int* x0, int* y0, int* x1, int* y1) {
+  (void)tm;
+  *x0 = stbte__ui.select_x0;
+  *y0 = stbte__ui.select_y0;
+  *x1 = stbte__ui.select_x1;
+  *y1 = stbte__ui.select_y1;
+}
+
+__attribute__((export_name("stbte_clear_selection"))) 
+void stbte_clear_sel(stbte_tilemap* tm) {
+  (void)tm;
+  stbte__ui.has_selection = 0;
+}
+
+__attribute__((export_name("stbte_has_selection"))) 
+int stbte_has_sel(stbte_tilemap* tm) {
+  (void)tm;
+  return stbte__ui.has_selection;
+}
+
+/* ==========================================================================
+ * 12. CLIPBOARD (COPY/CUT/PASTE)
+ * ========================================================================== */
+
+__attribute__((export_name("stbte_copy"))) 
+void stbte_copy_selection(stbte_tilemap* tm) {
+  stbte__copy_cut(tm, 0);
+}
+
+__attribute__((export_name("stbte_cut"))) 
+void stbte_cut_selection(stbte_tilemap* tm) {
+  stbte__copy_cut(tm, 1);
+}
+
+__attribute__((export_name("stbte_paste"))) 
+void stbte_paste_clipboard(stbte_tilemap* tm, int x, int y) {
+  // stbte centers the paste on x,y
+  stbte__paste(tm, x, y);
+}
+
+__attribute__((export_name("stbte_has_clipboard"))) 
+int stbte_has_clip(stbte_tilemap* tm) {
+  (void)tm;
+  return stbte__ui.has_copy;
+}
+
+__attribute__((export_name("stbte_get_clipboard_info"))) 
+void stbte_get_clip_info(stbte_tilemap* tm, int* width, int* height, int* src_x, int* src_y) {
+  (void)tm;
+  *width = stbte__ui.copy_width;
+  *height = stbte__ui.copy_height;
+  *src_x = stbte__ui.copy_src_x;
+  *src_y = stbte__ui.copy_src_y;
+}
+
+/* ==========================================================================
+ * 13. UNDO/REDO
+ * ========================================================================== */
+
+__attribute__((export_name("stbte_can_undo"))) 
+int stbte_undo_available(stbte_tilemap* tm) {
+  return stbte__undo_available(tm);
+}
+
+__attribute__((export_name("stbte_can_redo"))) 
+int stbte_redo_available(stbte_tilemap* tm) {
+  return stbte__redo_available(tm);
+}
+
+__attribute__((export_name("stbte_undo"))) 
+void stbte_do_undo(stbte_tilemap* tm) {
+  (void)tm;
+  stbte__undo(tm);
+}
+
+__attribute__((export_name("stbte_redo"))) 
+void stbte_do_redo(stbte_tilemap* tm) {
+  (void)tm;
+  stbte__redo(tm);
+}
+
+/* ==========================================================================
+ * 14. TILE INTERACTION (CLICK/DRAG)
+ * ========================================================================== */
+
+__attribute__((export_name("stbte_click_tile"))) 
+void stbte_click(stbte_tilemap* tm, int x, int y, int button) {
+  int tool = stbte__ui.tool;
+  
+  // Ensure coordinates are valid
+  if (x < 0 || x >= tm->max_x || y < 0 || y >= tm->max_y)
     return;
-
-  /* Read events from ring buffer using our local copy.
-   * The host writes to control_block.evt_head via Atomics. */
-  uint32_t head = control_block.evt_head;
-  uint32_t tail = evt_tail;
-
-  while (tail != head) {
-    uint32_t type = evt_buf[tail % EVT_BUF_WORDS];
-    tail++;
-
-    switch (type) {
-    case EVT_MOUSE_MOVE: {
-      int x = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      int y = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      int shifted = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      int scrollkey = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      stbte_mouse_move(tilemap, x, y, shifted, scrollkey);
+  
+  stbte__begin_undo(tm);
+  
+  switch (tool) {
+    case STBTE__tool_brush:
+      if (button == 0) {
+        stbte__brush(tm, x, y);
+      } else {
+        stbte__erase(tm, x, y, STBTE__erase_any);
+      }
       break;
-    }
-    case EVT_MOUSE_BUTTON: {
-      int x = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      int y = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      int right = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      int down = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      int shifted = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      int scrollkey = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      stbte_mouse_button(tilemap, x, y, right, down, shifted, scrollkey);
+      
+    case STBTE__tool_erase:
+      stbte__erase(tm, x, y, STBTE__erase_all);
       break;
-    }
-    case EVT_MOUSE_WHEEL: {
-      int x = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      int y = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      int vscroll = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      stbte_mouse_wheel(tilemap, x, y, vscroll);
+      
+    case STBTE__tool_eyedrop:
+      if (button == 0) {
+        stbte__eyedrop(tm, x, y);
+      }
       break;
-    }
-    case EVT_ACTION: {
-      int action = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      stbte_action(tilemap, (enum stbte_action)action);
+      
+    case STBTE__tool_select:
+      // Set selection to single tile
+      stbte__select_rect(tm, x, y, x, y);
       break;
-    }
-    case EVT_RESIZE: {
-      int x0 = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      int y0 = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      int x1 = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      int y1 = (int)evt_buf[tail % EVT_BUF_WORDS];
-      tail++;
-      stbte_set_display(x0, y0, x1, y1);
-      control_block.editor_width = (uint32_t)(x1 - x0);
-      control_block.editor_height = (uint32_t)(y1 - y0);
-      display_set = 1;
+      
+    case STBTE__tool_rect:
+      // Rectangle tool requires drag - single click fills just one tile
+      if (button == 0) {
+        stbte__brush(tm, x, y);
+      } else {
+        stbte__erase(tm, x, y, STBTE__erase_any);
+      }
       break;
-    }
-    }
   }
+  
+  stbte__end_undo(tm);
+}
 
-  evt_tail = tail;
-  control_block.evt_tail = tail;
+__attribute__((export_name("stbte_fill_rect"))) 
+void stbte_fill_rectangle(stbte_tilemap* tm, int x0, int y0, int x1, int y1, int fill) {
+  stbte__fillrect(tm, x0, y0, x1, y1, fill);
 }
 
 /* ==========================================================================
- * 8. EXPORTED FUNCTIONS
+ * 15. MAP DATA ACCESS (DIRECT POINTERS)
  * ========================================================================== */
 
-/* Initialize the editor with a new tilemap.
- * Call after loading WASM but before frame().
- * Parameters are read from the control block (set by host before calling). */
-__attribute__((export_name("init"))) uint32_t init(void) {
-  /* Read configuration from control block, use defaults if 0 */
-  uint32_t map_x = control_block.map_width;
-  uint32_t map_y = control_block.map_height;
-  uint32_t layers = control_block.num_layers;
-
-  if (map_x == 0)
-    map_x = 16;
-  if (map_y == 0)
-    map_y = 16;
-  if (layers == 0)
-    layers = 2;
-
-  if (map_x > STBTE_MAX_TILEMAP_X)
-    map_x = STBTE_MAX_TILEMAP_X;
-  if (map_y > STBTE_MAX_TILEMAP_Y)
-    map_y = STBTE_MAX_TILEMAP_Y;
-  if (layers > STBTE_MAX_LAYERS)
-    layers = STBTE_MAX_LAYERS;
-
-  /* Tile spacing (0 means default 16x16) */
-  int spacing_x = control_block.spacing_x;
-  int spacing_y = control_block.spacing_y;
-  if (spacing_x == 0) spacing_x = 16;
-  if (spacing_y == 0) spacing_y = 16;
-  int max_tiles = 1024;
-
-  tilemap = stbte_create_map((int)map_x, (int)map_y, (int)layers, spacing_x,
-                             spacing_y, max_tiles);
-  if (tilemap == NULL) {
-    return 1; /* allocation failed */
-  }
-
-  /* Set default display (will be overridden by EVT_RESIZE) */
-  stbte_set_display(0, 0, 800, 600);
-  display_set = 1;
-  /* Set spacing for map and palette (same values) */
-  stbte_set_spacing(tilemap, spacing_x, spacing_y, spacing_x, spacing_y);
-
-  /* Register a default background tile; other tiles can be added via define_tile() */
-  stbte_define_tile(tilemap, 0, 0xFF, "default");
-
-  /* Populate tile slot -> real ID lookup table */
-  tile_slot_count = tilemap->num_tiles;
-  for (int i = 0; i < tile_slot_count && i < MAX_TILE_SLOTS; i++) {
-    tile_slot_to_id[i] = tilemap->tiles[i].id;
-  }
-
-  /* Set tile 0 as background */
-  stbte_set_background_tile(tilemap, 0);
-
-  control_block.map_width = map_x;
-  control_block.map_height = map_y;
-  control_block.num_layers = layers;
-  control_block.initialized = 1;
-
-  return 0;
+// Get pointer to tile data at x,y - returns short[layers]
+__attribute__((export_name("stbte_get_tile_ptr"))) 
+short* stbte_get_tile_data(stbte_tilemap* tm, int x, int y) {
+  if (x < 0 || x >= tm->max_x || y < 0 || y >= tm->max_y)
+    return NULL;
+  return tm->data[y][x];
 }
 
-/* Run one frame: process events, tick, draw.
- * Called repeatedly by the worker's setInterval. */
-__attribute__((export_name("frame"))) uint32_t frame(void) {
-  if (tilemap == NULL || !display_set)
-    return 1;
-
-  /* Process pending input events */
-  process_events();
-
-  /* Tick with fixed dt (~16ms = 60fps) */
-  float dt = 1.0f / 60.0f;
-  stbte_tick(tilemap, dt);
-
-  /* Reset command buffer and draw */
-  cmd_reset();
-  stbte_draw(tilemap);
-
-  /* Write command count to control block */
-  if (active_write_buf == 0) {
-    control_block.cmd_count_a = cmd_count_a;
-  } else {
-    control_block.cmd_count_b = cmd_count_b;
-  }
-
-  /* Swap buffers: tell host which buffer to read */
-  control_block.active_read_buf = active_write_buf;
-  control_block.frame_ready = 1;
-
-  /* Switch to other buffer for next frame */
-  active_write_buf = 1 - active_write_buf;
-
-  return 0;
+// Set a single tile
+__attribute__((export_name("stbte_set_tile"))) 
+void stbte_set_tile_data(stbte_tilemap* tm, int x, int y, int layer, short tile_id) {
+  if (x < 0 || x >= tm->max_x || y < 0 || y >= tm->max_y)
+    return;
+  if (layer < 0 || layer >= tm->num_layers)
+    return;
+  tm->data[y][x][layer] = tile_id;
 }
 
-/* Define a new tile type.
- * Host writes tile info to a staging area, then calls this.
- * For simplicity, we use the PDK input mechanism. */
-__attribute__((export_name("define_tile"))) uint32_t define_tile_export(uint32_t id, uint32_t layermask, uint32_t category_index) {
-  if (tilemap == NULL) return 1;
-  if (id > 65535) return 3;
-  const char *category = "default";
-  if (category_index < CATEGORY_COUNT) {
-    category = category_names[category_index];
-  }
-  stbte_define_tile(tilemap, (unsigned short)id, (unsigned int)layermask, category);
-  tile_slot_count = tilemap->num_tiles;
-  int limit = tile_slot_count < MAX_TILE_SLOTS ? tile_slot_count : MAX_TILE_SLOTS;
-  for (int i = 0; i < limit; i++) {
-    tile_slot_to_id[i] = tilemap->tiles[i].id;
-  }
-  return 0;
+// Get pointer to the entire map data array
+__attribute__((export_name("stbte_get_map_data_ptr"))) 
+short* stbte_get_map_data(stbte_tilemap* tm) {
+  return (short*)tm->data;
 }
 
-__attribute__((export_name("set_spacing"))) uint32_t set_spacing(uint32_t sx, uint32_t sy) {
-  if (tilemap == NULL) return 1;
-  stbte_set_spacing(tilemap, (int)sx, (int)sy, (int)sx, (int)sy);
-  return 0;
+// Get pointer to layer info array
+__attribute__((export_name("stbte_get_layer_info_ptr"))) 
+stbte__layer* stbte_get_layer_info(stbte_tilemap* tm) {
+  return tm->layerinfo;
 }
 
-/* Get pointer to command buffer A (for SharedArrayBuffer mapping) */
-__attribute__((export_name("get_cmd_buf_a_ptr"))) uint32_t
-get_cmd_buf_a_ptr(void) {
-  return (uint32_t)(uintptr_t)cmd_buf_a;
+// Get pointer to tile info array
+__attribute__((export_name("stbte_get_tile_info_ptr"))) 
+stbte__tileinfo* stbte_get_tile_info(stbte_tilemap* tm) {
+  return tm->tiles;
 }
 
-/* Get pointer to command buffer B */
-__attribute__((export_name("get_cmd_buf_b_ptr"))) uint32_t
-get_cmd_buf_b_ptr(void) {
-  return (uint32_t)(uintptr_t)cmd_buf_b;
+// Get pointer to UI state
+__attribute__((export_name("stbte_get_ui_ptr"))) 
+stbte__ui_t* stbte_get_ui_state(void) {
+  return &stbte__ui;
 }
 
-/* Get pointer to event ring buffer */
-__attribute__((export_name("get_event_buf_ptr"))) uint32_t
-get_event_buf_ptr(void) {
-  return (uint32_t)(uintptr_t)evt_buf;
+// Get pointer to copy buffer
+__attribute__((export_name("stbte_get_copy_buffer_ptr"))) 
+short* stbte_get_copy_buffer(void) {
+  return (short*)stbte__ui.copybuffer;
 }
 
-/* Get pointer to control block */
-__attribute__((export_name("get_control_block_ptr"))) uint32_t
-get_control_block_ptr(void) {
-  return (uint32_t)(uintptr_t)&control_block;
+/* ==========================================================================
+ * 16. DISPLAY OPTIONS
+ * ========================================================================== */
+
+__attribute__((export_name("stbte_set_show_grid"))) 
+void stbte_set_grid(stbte_tilemap* tm, int show) {
+  (void)tm;
+  stbte__ui.show_grid = show;
 }
 
-/* Get pointer to event head (for host Atomics.store) */
-__attribute__((export_name("get_evt_head_ptr"))) uint32_t
-get_evt_head_ptr(void) {
-  return (uint32_t)(uintptr_t)&control_block.evt_head;
+__attribute__((export_name("stbte_get_show_grid"))) 
+int stbte_get_grid(stbte_tilemap* tm) {
+  (void)tm;
+  return stbte__ui.show_grid;
 }
 
-/* Get size of command buffer in uint32 words */
-__attribute__((export_name("get_cmd_buf_size"))) uint32_t
-get_cmd_buf_size(void) {
-  return CMD_BUF_WORDS;
+__attribute__((export_name("stbte_set_background_tile"))) 
+void stbte_set_bg_tile(stbte_tilemap* tm, short tile_id) {
+  stbte_set_background_tile(tm, tile_id);
 }
 
-/* Get size of event buffer in uint32 words */
-__attribute__((export_name("get_evt_buf_size"))) uint32_t
-get_evt_buf_size(void) {
-  return EVT_BUF_WORDS;
+__attribute__((export_name("stbte_get_background_tile"))) 
+short stbte_get_bg_tile(stbte_tilemap* tm) {
+  return tm->background_tile;
 }
 
-/* Get size of control block in bytes */
-__attribute__((export_name("get_control_block_size"))) uint32_t
-get_control_block_size(void) {
-  return (uint32_t)sizeof(control_block_t);
+/* ==========================================================================
+ * 17. UTILITY / INFO
+ * ========================================================================== */
+
+__attribute__((export_name("stbte_get_max_tiles"))) 
+int stbte_get_max_tiles_limit(void) {
+  return STBTE_MAX_TILEMAP_X * STBTE_MAX_TILEMAP_Y;
+}
+
+__attribute__((export_name("stbte_get_max_layers"))) 
+int stbte_get_max_layers_limit(void) {
+  return STBTE_MAX_LAYERS;
+}
+
+__attribute__((export_name("stbte_get_max_copy"))) 
+int stbte_get_max_copy_limit(void) {
+  return STBTE_MAX_COPY;
+}
+
+// Get map dimensions limits
+__attribute__((export_name("stbte_get_max_map_x"))) 
+int stbte_get_max_map_x_limit(void) {
+  return STBTE_MAX_TILEMAP_X;
+}
+
+__attribute__((export_name("stbte_get_max_map_y"))) 
+int stbte_get_max_map_y_limit(void) {
+  return STBTE_MAX_TILEMAP_Y;
+}
+
+/* ==========================================================================
+ * 18. MEMORY OFFSETS (for JS struct access)
+ * ========================================================================== */
+
+__attribute__((export_name("stbte_get_offset_stbte_tilemap_max_x"))) 
+int stbte_offset_max_x(void) {
+  return (int)offsetof(stbte_tilemap, max_x);
+}
+
+__attribute__((export_name("stbte_get_offset_stbte_tilemap_max_y"))) 
+int stbte_offset_max_y(void) {
+  return (int)offsetof(stbte_tilemap, max_y);
+}
+
+__attribute__((export_name("stbte_get_offset_stbte_tilemap_num_layers"))) 
+int stbte_offset_num_layers(void) {
+  return (int)offsetof(stbte_tilemap, num_layers);
+}
+
+__attribute__((export_name("stbte_get_offset_stbte_tilemap_num_tiles"))) 
+int stbte_offset_num_tiles(void) {
+  return (int)offsetof(stbte_tilemap, num_tiles);
+}
+
+__attribute__((export_name("stbte_get_offset_stbte_tilemap_cur_tile"))) 
+int stbte_offset_cur_tile(void) {
+  return (int)offsetof(stbte_tilemap, cur_tile);
+}
+
+__attribute__((export_name("stbte_get_offset_stbte_tilemap_cur_layer"))) 
+int stbte_offset_cur_layer(void) {
+  return (int)offsetof(stbte_tilemap, cur_layer);
+}
+
+__attribute__((export_name("stbte_get_offset_stbte_tilemap_solo_layer"))) 
+int stbte_offset_solo_layer(void) {
+  return (int)offsetof(stbte_tilemap, solo_layer);
+}
+
+__attribute__((export_name("stbte_get_offset_stbte_tilemap_background_tile"))) 
+int stbte_offset_bg_tile(void) {
+  return (int)offsetof(stbte_tilemap, background_tile);
+}
+
+__attribute__((export_name("stbte_get_offset_stbte_tilemap_data"))) 
+int stbte_offset_data(void) {
+  return (int)offsetof(stbte_tilemap, data);
+}
+
+__attribute__((export_name("stbte_get_offset_stbte_tilemap_tiles"))) 
+int stbte_offset_tiles(void) {
+  return (int)offsetof(stbte_tilemap, tiles);
+}
+
+__attribute__((export_name("stbte_get_sizeof_stbte_tilemap"))) 
+int stbte_sizeof_tilemap(void) {
+  return (int)sizeof(stbte_tilemap);
+}
+
+__attribute__((export_name("stbte_get_sizeof_stbte__layer"))) 
+int stbte_sizeof_layer(void) {
+  return (int)sizeof(stbte__layer);
+}
+
+__attribute__((export_name("stbte_get_sizeof_stbte__tileinfo"))) 
+int stbte_sizeof_tileinfo(void) {
+  return (int)sizeof(stbte__tileinfo);
+}
+
+__attribute__((export_name("stbte_get_sizeof_stbte__ui_t"))) 
+int stbte_sizeof_ui(void) {
+  return (int)sizeof(stbte__ui_t);
 }

@@ -35,17 +35,12 @@ BUILD_DIR ?= build.nosync
 all: web
 
 stb_tilemap_editor.wasm: src/main.c $(wildcard src/*.h) | $(BUILD_DIR)
-	$(Q)echo "Building stb_tilemap_editor plugin (shared memory)..."
+	$(Q)echo "Building stb_tilemap_editor headless WASM..."
 	$(Q)zig build-exe $< \
 		-target wasm32-freestanding \
-		-mcpu generic+atomics+bulk_memory \
 		-fno-entry \
 		-rdynamic \
 		-O ReleaseFast \
-		--import-memory \
-		--shared-memory \
-		--initial-memory=10354688 \
-		--max-memory=33554432 \
 		-femit-bin=$@
 
 $(BUILD_DIR):
