@@ -112,14 +112,13 @@ static size_t strlen(const char *s) {
  * 3. EXPORTED API - ACTION FUNCTIONS ONLY
  * ========================================================================== */
 
-// Tool constants
-#define STBTE_TOOL_SELECT 0
-#define STBTE_TOOL_BRUSH 1
-#define STBTE_TOOL_ERASE 2
-#define STBTE_TOOL_RECTANGLE 3
-#define STBTE_TOOL_EYEDROPPER 4
-#define STBTE_TOOL_FILL 5
-#define STBTE_TOOL_LINK 6
+// Tool constants (exposed to JS frontend)
+#define STBTE_TOOL_SELECT    0
+#define STBTE_TOOL_BRUSH     1
+#define STBTE_TOOL_ERASE     2
+#define STBTE_TOOL_EYEDROPPER 3
+#define STBTE_TOOL_FILL      4
+#define STBTE_TOOL_LINK      5
 
 /* ==========================================================================
  * LIFECYCLE
@@ -170,7 +169,6 @@ void stbte_set_current_tool(stbte_tilemap* tm, int tool) {
     case STBTE_TOOL_SELECT:    stbte__ui.tool = STBTE__tool_select;  break;
     case STBTE_TOOL_BRUSH:     stbte__ui.tool = STBTE__tool_brush;   break;
     case STBTE_TOOL_ERASE:     stbte__ui.tool = STBTE__tool_erase;   break;
-    case STBTE_TOOL_RECTANGLE: stbte__ui.tool = STBTE__tool_rect;    break;
     case STBTE_TOOL_EYEDROPPER:stbte__ui.tool = STBTE__tool_eyedrop; break;
     // Fill and Link tools not implemented in headless mode — ignored
   }
@@ -309,63 +307,33 @@ void stbte_do_redo(stbte_tilemap* tm) {
  * TILE INTERACTION
  * ========================================================================== */
 
-__attribute__((export_name("stbte_click_tile"))) 
-void stbte_click(stbte_tilemap* tm, int x, int y, int button) {
-  if (x < 0 || x >= tm->max_x || y < 0 || y >= tm->max_y)
-    return;
-  
-  stbte__begin_undo(tm);
-  
+__attribute__((export_name("stbte_apply"))) 
+void stbte_apply(stbte_tilemap* tm, int x0, int y0, int x1, int y1) {
+  // Clamp to map bounds
+  if (x0 < 0) x0 = 0; if (x0 >= tm->max_x) x0 = tm->max_x - 1;
+  if (y0 < 0) y0 = 0; if (y0 >= tm->max_y) y0 = tm->max_y - 1;
+  if (x1 < 0) x1 = 0; if (x1 >= tm->max_x) x1 = tm->max_x - 1;
+  if (y1 < 0) y1 = 0; if (y1 >= tm->max_y) y1 = tm->max_y - 1;
+
   switch (stbte__ui.tool) {
     case STBTE__tool_brush:
-      if (button == 0) {
-        stbte__brush(tm, x, y);
-      } else {
-        stbte__erase(tm, x, y, STBTE__erase_any);
-      }
+      stbte__fillrect(tm, x0, y0, x1, y1, 1);
       break;
-      
+
     case STBTE__tool_erase:
-      stbte__erase(tm, x, y, STBTE__erase_all);
+      stbte__fillrect(tm, x0, y0, x1, y1, 0);
       break;
-      
-    case STBTE__tool_eyedrop:
-      if (button == 0) {
-        stbte__eyedrop(tm, x, y);
-      }
-      break;
-      
+
     case STBTE__tool_select:
-      stbte__ui.has_selection = 1;
-      stbte__ui.select_x0 = x;
-      stbte__ui.select_y0 = y;
-      stbte__ui.select_x1 = x;
-      stbte__ui.select_y1 = y;
+      stbte__select_rect(tm, x0, y0, x1, y1);
       break;
-      
-    case STBTE__tool_rect:
-      if (button == 0) {
-        stbte__brush(tm, x, y);
-      } else {
-        stbte__erase(tm, x, y, STBTE__erase_any);
-      }
+
+    case STBTE__tool_eyedrop:
+      stbte__eyedrop(tm, x0, y0);
       break;
   }
-  
-  stbte__end_undo(tm);
-  stbte__recompute_undo_available(tm);
-}
 
-__attribute__((export_name("stbte_fill_rect"))) 
-void stbte_fill_rectangle(stbte_tilemap* tm, int x0, int y0, int x1, int y1, int fill) {
-  stbte__fillrect(tm, x0, y0, x1, y1, fill);
   stbte__recompute_undo_available(tm);
-}
-
-__attribute__((export_name("stbte_select_rect"))) 
-void stbte_select_rectangle(stbte_tilemap* tm, int x0, int y0, int x1, int y1) {
-  (void)tm;
-  stbte__select_rect(tm, x0, y0, x1, y1);
 }
 
 /* ==========================================================================
@@ -396,7 +364,6 @@ int stbte_get_current_tool(void) {
     case STBTE__tool_select:  return STBTE_TOOL_SELECT;
     case STBTE__tool_brush:   return STBTE_TOOL_BRUSH;
     case STBTE__tool_erase:   return STBTE_TOOL_ERASE;
-    case STBTE__tool_rect:    return STBTE_TOOL_RECTANGLE;
     case STBTE__tool_eyedrop: return STBTE_TOOL_EYEDROPPER;
     case STBTE__tool_fill:    return STBTE_TOOL_FILL;
     case STBTE__tool_link:    return STBTE_TOOL_LINK;

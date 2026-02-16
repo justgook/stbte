@@ -254,11 +254,11 @@ log(`Active layer set to: ${curLayer}`);
 // Reset to "all layers" so brush can find a valid layer for the tile
 exports.stbte_set_active_layer(tilemap, -1);
 
-// Test: Click on tile
-log('\n=== Testing Click Operation ===');
+// Test: Apply brush to single tile
+log('\n=== Testing Apply Operation ===');
 exports.stbte_set_tool(tilemap, 1); // Brush tool
-exports.stbte_click_tile(tilemap, 5, 5, 0);
-log('Clicked at (5,5) with brush tool');
+exports.stbte_apply(tilemap, 5, 5, 5, 5);
+log('Applied brush at (5,5)');
 
 // Test: Read map data
 log('\n=== Reading Map Data ===');

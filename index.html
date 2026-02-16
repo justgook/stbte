@@ -96,8 +96,7 @@
       <button class="tool-btn" data-tool="0">Select</button>
       <button class="tool-btn active" data-tool="1">Brush</button>
       <button class="tool-btn" data-tool="2">Erase</button>
-      <button class="tool-btn" data-tool="3">Rectangle</button>
-      <button class="tool-btn" data-tool="4">Eyedropper</button>
+      <button class="tool-btn" data-tool="3">Eyedropper</button>
     </div>
     <div style="margin-top: 10px;">
       <button id="undo-btn">Undo</button>
@@ -390,6 +389,15 @@
 
         const canvas = document.getElementById('tilemap');
         let isDragging = false;
+        let areaDrag = false;  // true when dragging to define an area (select tool, or shift+brush)
+        this.dragStartX = -1;
+        this.dragStartY = -1;
+        this.dragEndX = -1;
+        this.dragEndY = -1;
+        this.showDragPreview = false;
+
+        // Select always drags an area; brush/erase do area-drag when shift is held
+        const isAreaDrag = (e) => this.currentTool === 0 || (e.shiftKey && (this.currentTool === 1 || this.currentTool === 2));
 
         canvas.addEventListener('mousedown', (e) => {
           const rect = canvas.getBoundingClientRect();
@@ -398,10 +406,22 @@
           
           if (x >= 0 && x < this.mapWidth && y >= 0 && y < this.mapHeight) {
             isDragging = true;
-            const button = e.button === 2 ? 1 : 0;
-            this.exports.stbte_click_tile(this.tilemap, x, y, button);
-            this.render();
-            log(`Click ${x},${y}`);
+            this.dragStartX = x;
+            this.dragStartY = y;
+
+            if (isAreaDrag(e)) {
+              areaDrag = true;
+              this.dragEndX = x;
+              this.dragEndY = y;
+              this.showDragPreview = true;
+              this.render();
+            } else {
+              areaDrag = false;
+              this.showDragPreview = false;
+              this.exports.stbte_apply(this.tilemap, x, y, x, y);
+              this.render();
+              log(`Click ${x},${y}`);
+            }
           }
         });
 
@@ -410,14 +430,34 @@
           const rect = canvas.getBoundingClientRect();
           const x = Math.floor((e.clientX - rect.left) / this.tileSize);
           const y = Math.floor((e.clientY - rect.top) / this.tileSize);
-          
-          if (x >= 0 && x < this.mapWidth && y >= 0 && y < this.mapHeight && this.currentTool === 1) {
-            this.exports.stbte_click_tile(this.tilemap, x, y, 0);
+          if (x < 0 || x >= this.mapWidth || y < 0 || y >= this.mapHeight) return;
+
+          if (areaDrag) {
+            this.dragEndX = x;
+            this.dragEndY = y;
+            this.render();
+          } else if (this.currentTool === 1 || this.currentTool === 2) {
+            this.exports.stbte_apply(this.tilemap, x, y, x, y);
             this.render();
           }
         });
 
-        canvas.addEventListener('mouseup', () => isDragging = false);
+        canvas.addEventListener('mouseup', (e) => {
+          if (isDragging && areaDrag) {
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.floor((e.clientX - rect.left) / this.tileSize);
+            const y = Math.floor((e.clientY - rect.top) / this.tileSize);
+            const ex = Math.max(0, Math.min(x, this.mapWidth - 1));
+            const ey = Math.max(0, Math.min(y, this.mapHeight - 1));
+            this.exports.stbte_apply(this.tilemap, this.dragStartX, this.dragStartY, ex, ey);
+            const toolName = ['Select', 'Area fill', 'Area erase'][this.currentTool] || 'Apply';
+            log(`${toolName} (${this.dragStartX},${this.dragStartY})-(${ex},${ey})`);
+            this.showDragPreview = false;
+            this.render();
+          }
+          isDragging = false;
+          areaDrag = false;
+        });
         canvas.addEventListener('contextmenu', e => e.preventDefault());
 
         this.setupLayers();
@@ -649,6 +689,24 @@
               ctx.strokeRect(px, py, this.tileSize, this.tileSize);
             }
           }
+        }
+
+        // Draw shift-drag area preview
+        if (this.showDragPreview) {
+          const ax0 = Math.min(this.dragStartX, this.dragEndX);
+          const ay0 = Math.min(this.dragStartY, this.dragEndY);
+          const ax1 = Math.max(this.dragStartX, this.dragEndX);
+          const ay1 = Math.max(this.dragStartY, this.dragEndY);
+          const px = ax0 * this.tileSize;
+          const py = ay0 * this.tileSize;
+          const pw = (ax1 - ax0 + 1) * this.tileSize;
+          const ph = (ay1 - ay0 + 1) * this.tileSize;
+          ctx.fillStyle = 'rgba(255, 255, 100, 0.15)';
+          ctx.fillRect(px, py, pw, ph);
+          ctx.strokeStyle = 'rgba(255, 255, 100, 0.8)';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(px + 1, py + 1, pw - 2, ph - 2);
+          ctx.lineWidth = 1;
         }
       }
     }
