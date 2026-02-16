@@ -287,11 +287,25 @@
         this.offsets.max_map_y = this.exports.stbte_max_map_y();
         this.offsets.max_layers = this.exports.stbte_max_layers();
         
+        // Absolute address of the global stbte__ui struct in WASM memory
+        this.uiPtr = this.exports.stbte_ui_ptr();
+        
         console.log('Offsets loaded:', this.offsets);
+        console.log('UI pointer:', this.uiPtr);
       }
 
       readTilemap(offset, type = 'i32') {
         const view = new DataView(this.memory.buffer, this.tilemap + offset);
+        switch (type) {
+          case 'i8': return view.getInt8(0);
+          case 'i16': return view.getInt16(0, true);
+          case 'i32': return view.getInt32(0, true);
+          default: return view.getInt32(0, true);
+        }
+      }
+
+      readUI(offset, type = 'i32') {
+        const view = new DataView(this.memory.buffer, this.uiPtr + offset);
         switch (type) {
           case 'i8': return view.getInt8(0);
           case 'i16': return view.getInt16(0, true);
@@ -306,6 +320,8 @@
       getCurrentTile() { return this.readTilemap(this.offsets.tm_cur_tile, 'i32'); }
       canUndo() { return this.readTilemap(this.offsets.tm_undo_available, 'i8'); }
       canRedo() { return this.readTilemap(this.offsets.tm_redo_available, 'i8'); }
+      hasSelection() { return this.readUI(this.offsets.ui_has_selection, 'i32'); }
+      hasCopy() { return this.readUI(this.offsets.ui_has_copy, 'i32'); }
 
       defineTiles() {
         const tiles = [
@@ -439,10 +455,10 @@
           });
           layerRow.appendChild(nameSpan);
           
-          // Read layer state from memory
-          const layerOffset = this.offsets.tm_layerinfo + (i * this.offsets.sizeof_layer);
-          const hidden = new DataView(this.memory.buffer, layerOffset + this.offsets.layer_hidden, 1).getInt8(0);
-          const locked = new DataView(this.memory.buffer, layerOffset + this.offsets.layer_locked, 1).getInt8(0);
+          // Read layer state from memory (tilemap base + layerinfo offset + per-layer stride)
+          const layerOffset = this.tilemap + this.offsets.tm_layerinfo + (i * this.offsets.sizeof_layer);
+          const hidden = new DataView(this.memory.buffer, layerOffset + this.offsets.layer_hidden, 4).getInt32(0, true);
+          const locked = new DataView(this.memory.buffer, layerOffset + this.offsets.layer_locked, 4).getInt32(0, true);
           const soloLayer = this.readTilemap(this.offsets.tm_solo_layer, 'i32');
           const isSolo = soloLayer === i;
           
@@ -456,7 +472,7 @@
               log(`Setting layer ${i} hidden to ${newHidden}`);
               this.exports.stbte_set_layer_hidden(this.tilemap, i, newHidden);
               // Verify it was set
-              const verifyHidden = new DataView(this.memory.buffer, layerOffset + this.offsets.layer_hidden, 1).getInt8(0);
+              const verifyHidden = new DataView(this.memory.buffer, layerOffset + this.offsets.layer_hidden, 4).getInt32(0, true);
               log(`Verified hidden=${verifyHidden}`);
               this.setupLayers();
               this.render();
@@ -605,9 +621,9 @@
             ctx.fillRect(px, py, this.tileSize, this.tileSize);
             
             for (let l = 0; l < this.layers; l++) {
-              // Check if layer is hidden
-              const layerOffset = this.offsets.tm_layerinfo + (l * this.offsets.sizeof_layer);
-              const hidden = new DataView(this.memory.buffer, layerOffset + this.offsets.layer_hidden, 1).getInt8(0);
+              // Check if layer is hidden (tilemap base + layerinfo offset + per-layer stride)
+              const layerOffset = this.tilemap + this.offsets.tm_layerinfo + (l * this.offsets.sizeof_layer);
+              const hidden = new DataView(this.memory.buffer, layerOffset + this.offsets.layer_hidden, 4).getInt32(0, true);
               
               // Skip hidden layers
               if (hidden) continue;

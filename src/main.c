@@ -141,6 +141,12 @@ void stbte_destroy(stbte_tilemap* tm) {
 __attribute__((export_name("stbte_clear"))) 
 void stbte_clear(stbte_tilemap* tm) {
   stbte_clear_map(tm);
+  // Reset undo state — clearing is not undoable
+  tm->undo_len = 0;
+  tm->redo_len = 0;
+  tm->undo_pos = 0;
+  tm->undo_available_valid = 0;
+  stbte__recompute_undo_available(tm);
 }
 
 __attribute__((export_name("stbte_set_dimensions"))) 
@@ -161,15 +167,13 @@ __attribute__((export_name("stbte_set_tool")))
 void stbte_set_current_tool(stbte_tilemap* tm, int tool) {
   (void)tm;
   switch (tool) {
-    case STBTE_TOOL_SELECT: stbte__ui.tool = STBTE__tool_select; break;
-    case STBTE_TOOL_BRUSH: stbte__ui.tool = STBTE__tool_brush; break;
-    case STBTE_TOOL_ERASE: stbte__ui.tool = STBTE__tool_erase; break;
-    case STBTE_TOOL_RECTANGLE: stbte__ui.tool = STBTE__tool_rect; break;
-    case STBTE_TOOL_EYEDROPPER: stbte__ui.tool = STBTE__tool_eyedrop; break;
-    case STBTE_TOOL_FILL: stbte__ui.tool = STBTE__tool_fill; break;
-    case STBTE_TOOL_LINK: stbte__ui.tool = STBTE__tool_link; break;
+    case STBTE_TOOL_SELECT:    stbte__ui.tool = STBTE__tool_select;  break;
+    case STBTE_TOOL_BRUSH:     stbte__ui.tool = STBTE__tool_brush;   break;
+    case STBTE_TOOL_ERASE:     stbte__ui.tool = STBTE__tool_erase;   break;
+    case STBTE_TOOL_RECTANGLE: stbte__ui.tool = STBTE__tool_rect;    break;
+    case STBTE_TOOL_EYEDROPPER:stbte__ui.tool = STBTE__tool_eyedrop; break;
+    // Fill and Link tools not implemented in headless mode — ignored
   }
-  stbte__ui.has_selection = 0;
 }
 
 /* ==========================================================================
@@ -197,30 +201,40 @@ void stbte_set_layer_hide(stbte_tilemap* tm, int layer, int hidden) {
 __attribute__((export_name("stbte_set_layer_locked"))) 
 void stbte_set_layer_lock(stbte_tilemap* tm, int layer, int locked) {
   if (layer >= 0 && layer < tm->num_layers) {
-    tm->layerinfo[layer].locked = locked % 3;
+    tm->layerinfo[layer].locked = (locked < 0) ? 0 : (locked > 2) ? 2 : locked;
   }
 }
 
 __attribute__((export_name("stbte_set_active_layer"))) 
 void stbte_set_cur_layer(stbte_tilemap* tm, int layer) {
-  tm->cur_layer = layer;
+  if (layer >= -1 && layer < tm->num_layers)
+    tm->cur_layer = layer;
 }
 
 __attribute__((export_name("stbte_set_solo_layer"))) 
 void stbte_set_sololayer(stbte_tilemap* tm, int layer) {
-  tm->solo_layer = layer;
+  if (layer >= -1 && layer < tm->num_layers)
+    tm->solo_layer = layer;
 }
 
 /* ==========================================================================
  * TILE DEFINITIONS
  * ========================================================================== */
 
+// Pre-allocated category string table (avoids leaking 32 bytes per define_tile call)
+static char category_strings[STBTE_MAX_CATEGORIES][8];
+static int category_strings_initted = 0;
+
 __attribute__((export_name("stbte_define_tile"))) 
 void stbte_add_tile(stbte_tilemap* tm, unsigned short id, unsigned int layermask, int category_index) {
-  // Allocate buffer on heap since stbte stores the pointer
-  char* cat_buf = (char*)malloc_internal(32);
-  sprintf(cat_buf, "%d", category_index);
-  stbte_define_tile(tm, id, layermask, cat_buf);
+  if (!category_strings_initted) {
+    for (int i = 0; i < STBTE_MAX_CATEGORIES; i++)
+      sprintf(category_strings[i], "%d", i);
+    category_strings_initted = 1;
+  }
+  if (category_index < 0 || category_index >= STBTE_MAX_CATEGORIES)
+    return;
+  stbte_define_tile(tm, id, layermask, category_strings[category_index]);
 }
 
 /* ==========================================================================
@@ -266,11 +280,13 @@ void stbte_copy_selection(stbte_tilemap* tm) {
 __attribute__((export_name("stbte_cut"))) 
 void stbte_cut_selection(stbte_tilemap* tm) {
   stbte__copy_cut(tm, 1);
+  stbte__recompute_undo_available(tm);
 }
 
 __attribute__((export_name("stbte_paste"))) 
 void stbte_paste_clipboard(stbte_tilemap* tm, int x, int y) {
   stbte__paste(tm, x, y);
+  stbte__recompute_undo_available(tm);
 }
 
 /* ==========================================================================
@@ -279,14 +295,14 @@ void stbte_paste_clipboard(stbte_tilemap* tm, int x, int y) {
 
 __attribute__((export_name("stbte_undo"))) 
 void stbte_do_undo(stbte_tilemap* tm) {
-  (void)tm;
   stbte__undo(tm);
+  stbte__recompute_undo_available(tm);
 }
 
 __attribute__((export_name("stbte_redo"))) 
 void stbte_do_redo(stbte_tilemap* tm) {
-  (void)tm;
   stbte__redo(tm);
+  stbte__recompute_undo_available(tm);
 }
 
 /* ==========================================================================
@@ -337,16 +353,19 @@ void stbte_click(stbte_tilemap* tm, int x, int y, int button) {
   }
   
   stbte__end_undo(tm);
+  stbte__recompute_undo_available(tm);
 }
 
 __attribute__((export_name("stbte_fill_rect"))) 
 void stbte_fill_rectangle(stbte_tilemap* tm, int x0, int y0, int x1, int y1, int fill) {
-  // Based on current tool, either fill tiles or create selection
-  if (stbte__ui.tool == STBTE__tool_select) {
-    stbte__select_rect(tm, x0, y0, x1, y1);
-  } else {
-    stbte__fillrect(tm, x0, y0, x1, y1, fill);
-  }
+  stbte__fillrect(tm, x0, y0, x1, y1, fill);
+  stbte__recompute_undo_available(tm);
+}
+
+__attribute__((export_name("stbte_select_rect"))) 
+void stbte_select_rectangle(stbte_tilemap* tm, int x0, int y0, int x1, int y1) {
+  (void)tm;
+  stbte__select_rect(tm, x0, y0, x1, y1);
 }
 
 /* ==========================================================================
@@ -365,6 +384,33 @@ void stbte_set_tile_data(stbte_tilemap* tm, int x, int y, int layer, short tile_
 __attribute__((export_name("stbte_set_background_tile"))) 
 void stbte_set_bg_tile(stbte_tilemap* tm, short tile_id) {
   stbte_set_background_tile(tm, tile_id);
+}
+
+/* ==========================================================================
+ * GETTER FUNCTIONS
+ * ========================================================================== */
+
+__attribute__((export_name("stbte_get_tool")))
+int stbte_get_current_tool(void) {
+  switch (stbte__ui.tool) {
+    case STBTE__tool_select:  return STBTE_TOOL_SELECT;
+    case STBTE__tool_brush:   return STBTE_TOOL_BRUSH;
+    case STBTE__tool_erase:   return STBTE_TOOL_ERASE;
+    case STBTE__tool_rect:    return STBTE_TOOL_RECTANGLE;
+    case STBTE__tool_eyedrop: return STBTE_TOOL_EYEDROPPER;
+    case STBTE__tool_fill:    return STBTE_TOOL_FILL;
+    case STBTE__tool_link:    return STBTE_TOOL_LINK;
+    default:                  return -1;
+  }
+}
+
+__attribute__((export_name("stbte_get_tile_id")))
+int stbte_get_tile_at(stbte_tilemap* tm, int x, int y, int layer) {
+  if (x < 0 || x >= tm->max_x || y < 0 || y >= tm->max_y)
+    return -1;
+  if (layer < 0 || layer >= tm->num_layers)
+    return -1;
+  return tm->data[y][x][layer];
 }
 
 /* ==========================================================================
@@ -427,6 +473,10 @@ int stbte_offset_tileinfo_layermask(void) { return offsetof(stbte__tileinfo, lay
 
 __attribute__((export_name("stbte_offset_tileinfo_category_id"))) 
 int stbte_offset_tileinfo_category_id(void) { return offsetof(stbte__tileinfo, category_id); }
+
+// stbte__ui_t base address (static global — need absolute ptr for JS)
+__attribute__((export_name("stbte_ui_ptr")))
+int stbte_get_ui_ptr(void) { return (int)(uintptr_t)&stbte__ui; }
 
 // stbte__ui_t offsets
 __attribute__((export_name("stbte_offset_ui_tool"))) 

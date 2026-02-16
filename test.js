@@ -78,6 +78,10 @@ offsets.max_map_x = exports.stbte_max_map_x();
 offsets.max_map_y = exports.stbte_max_map_y();
 offsets.max_layers = exports.stbte_max_layers();
 
+// Absolute address of stbte__ui global in WASM memory
+const uiPtr = exports.stbte_ui_ptr();
+log(`UI pointer: ${uiPtr} (0x${uiPtr.toString(16)})`);
+
 log('Offsets loaded:');
 Object.entries(offsets).forEach(([k, v]) => {
   log(`  ${k}: ${v}`);
@@ -91,6 +95,24 @@ function readTilemap(tilemapPtr, offset, type = 'i32') {
     case 'i16': return view.getInt16(0, true);
     case 'i32': return view.getInt32(0, true);
     default: return view.getInt32(0, true);
+  }
+}
+
+// Helper to read from the global stbte__ui struct
+function readUI(offset, type = 'i32') {
+  const view = new DataView(memory.buffer, uiPtr + offset);
+  switch (type) {
+    case 'i8': return view.getInt8(0);
+    case 'i16': return view.getInt16(0, true);
+    case 'i32': return view.getInt32(0, true);
+    default: return view.getInt32(0, true);
+  }
+}
+
+function assert(condition, msg) {
+  if (!condition) {
+    log(`ASSERT FAILED: ${msg}`);
+    process.exit(1);
   }
 }
 
@@ -229,6 +251,9 @@ exports.stbte_set_active_layer(tilemap, 1);
 const curLayer = readTilemap(tilemap, offsets.tm_cur_layer, 'i32');
 log(`Active layer set to: ${curLayer}`);
 
+// Reset to "all layers" so brush can find a valid layer for the tile
+exports.stbte_set_active_layer(tilemap, -1);
+
 // Test: Click on tile
 log('\n=== Testing Click Operation ===');
 exports.stbte_set_tool(tilemap, 1); // Brush tool
@@ -256,15 +281,68 @@ log('\n=== Testing Undo/Redo ===');
 const canUndo = readTilemap(tilemap, offsets.tm_undo_available, 'i8');
 const canRedo = readTilemap(tilemap, offsets.tm_redo_available, 'i8');
 log(`Can undo: ${canUndo}, Can redo: ${canRedo}`);
+assert(canUndo === 1, 'Expected undo to be available after painting a tile');
+assert(canRedo === 0, 'Expected redo to NOT be available (no undo performed yet)');
 
 exports.stbte_undo(tilemap);
 log('Undo performed');
 
-// Test: Selection
+const canUndoAfter = readTilemap(tilemap, offsets.tm_undo_available, 'i8');
+const canRedoAfter = readTilemap(tilemap, offsets.tm_redo_available, 'i8');
+log(`After undo - Can undo: ${canUndoAfter}, Can redo: ${canRedoAfter}`);
+assert(canRedoAfter === 1, 'Expected redo to be available after undo');
+
+// Verify the tile was restored
+const tileAfterUndo = new Int16Array(memory.buffer, dataOffset + tileIdx * 2, 1)[0];
+log(`Tile at (5,5) after undo: ${tileAfterUndo}`);
+
+// Test: Redo
+exports.stbte_redo(tilemap);
+log('Redo performed');
+const tileAfterRedo = new Int16Array(memory.buffer, dataOffset + tileIdx * 2, 1)[0];
+log(`Tile at (5,5) after redo: ${tileAfterRedo}`);
+assert(tileAfterRedo === tileValue, 'Expected tile to be restored after redo');
+
+// Test: Selection (using uiPtr + offset, not raw offsetof)
 log('\n=== Testing Selection ===');
 exports.stbte_set_selection(tilemap, 1, 1, 5, 5);
-const hasSel = new DataView(memory.buffer, exports.stbte_offset_ui_has_selection(), 4).getInt32(0, true);
-log(`Has selection: ${hasSel}`);
+const hasSel = readUI(offsets.ui_has_selection, 'i32');
+const selX0 = readUI(offsets.ui_select_x0, 'i32');
+const selY0 = readUI(offsets.ui_select_y0, 'i32');
+const selX1 = readUI(offsets.ui_select_x1, 'i32');
+const selY1 = readUI(offsets.ui_select_y1, 'i32');
+log(`Has selection: ${hasSel}, bounds: (${selX0},${selY0})-(${selX1},${selY1})`);
+assert(hasSel === 1, 'Expected has_selection to be 1');
+assert(selX0 === 1 && selY0 === 1 && selX1 === 5 && selY1 === 5, 'Expected selection bounds (1,1)-(5,5)');
+
+// Test: Tool getter
+log('\n=== Testing Tool Getter ===');
+const currentTool = exports.stbte_get_tool();
+log(`Current tool: ${currentTool} (expected 1 = brush)`);
+assert(currentTool === 1, 'Expected brush tool (1)');
+
+exports.stbte_set_tool(tilemap, 0); // select
+const selectTool = exports.stbte_get_tool();
+log(`After set_tool(0): ${selectTool} (expected 0 = select)`);
+assert(selectTool === 0, 'Expected select tool (0)');
+
+// Verify selection is preserved across tool switch (bug #5 fix)
+const hasSelAfterSwitch = readUI(offsets.ui_has_selection, 'i32');
+log(`Selection preserved after tool switch: ${hasSelAfterSwitch}`);
+assert(hasSelAfterSwitch === 1, 'Expected selection to be preserved after tool switch');
+
+// Reset to brush for subsequent operations
+exports.stbte_set_tool(tilemap, 1);
+
+// Test: Tile getter
+log('\n=== Testing Tile Getter ===');
+const gotTile = exports.stbte_get_tile_id(tilemap, 5, 5, 0);
+log(`get_tile_id(5,5,0) = ${gotTile}`);
+
+// Test: Out-of-bounds getter returns -1
+const oobTile = exports.stbte_get_tile_id(tilemap, -1, 0, 0);
+assert(oobTile === -1, 'Expected -1 for out-of-bounds tile read');
+log('Out-of-bounds tile read correctly returns -1');
 
 // All tests passed
 log('\n=== ALL TESTS COMPLETED ===');
