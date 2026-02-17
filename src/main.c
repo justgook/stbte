@@ -93,10 +93,6 @@ static size_t strlen(const char *s) {
 #define STBTE_MAX_COPY 4096
 #endif
 
-// Stub out draw callbacks (headless)
-#define STBTE_DRAW_RECT(x0, y0, x1, y1, color) ((void)0)
-#define STBTE_DRAW_TILE(x0, y0, id, highlight, data) ((void)0)
-
 #ifdef _WIN32
 #undef _WIN32
 #endif
@@ -149,11 +145,6 @@ void stbte_clear(stbte_tilemap* tm) {
 __attribute__((export_name("stbte_set_dimensions"))) 
 void stbte_set_dims(stbte_tilemap* tm, int max_x, int max_y) {
   stbte_set_dimensions(tm, max_x, max_y);
-}
-
-__attribute__((export_name("stbte_set_spacing"))) 
-void stbte_set_space(stbte_tilemap* tm, int spacing_x, int spacing_y) {
-  stbte_set_spacing(tm, spacing_x, spacing_y, spacing_x + 1, spacing_y + 1);
 }
 
 /* ==========================================================================
