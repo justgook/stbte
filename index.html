@@ -287,17 +287,25 @@
       white-space: pre-wrap;
     }
 
-    @media (max-width: 1080px) {
+    @media (max-width: 1080px) and (orientation: landscape) {
       .app {
-        grid-template-columns: 1fr;
-      }
-
-      .sidebar {
-        max-height: none;
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: 1fr;
       }
 
       .tile-grid {
-        grid-template-columns: repeat(10, minmax(0, 1fr));
+        grid-template-columns: repeat(8, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 1080px) and (orientation: portrait) {
+      .app {
+        grid-template-columns: 1fr;
+        grid-template-rows: 1fr 1fr;
+      }
+
+      .tile-grid {
+        grid-template-columns: repeat(7, minmax(0, 1fr));
       }
     }
   </style>
