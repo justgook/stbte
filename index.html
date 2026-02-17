@@ -53,6 +53,41 @@
       overflow-x: hidden;
     }
 
+    .sidebar,
+    .tile-grid,
+    #output {
+      scrollbar-width: thin;
+      scrollbar-color: #43566d #0e1520;
+    }
+
+    .sidebar::-webkit-scrollbar,
+    .tile-grid::-webkit-scrollbar,
+    #output::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+
+    .sidebar::-webkit-scrollbar-track,
+    .tile-grid::-webkit-scrollbar-track,
+    #output::-webkit-scrollbar-track {
+      background: #0e1520;
+      border-radius: 10px;
+    }
+
+    .sidebar::-webkit-scrollbar-thumb,
+    .tile-grid::-webkit-scrollbar-thumb,
+    #output::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, #5c728b, #3d5065);
+      border-radius: 10px;
+      border: 2px solid #0e1520;
+    }
+
+    .sidebar::-webkit-scrollbar-thumb:hover,
+    .tile-grid::-webkit-scrollbar-thumb:hover,
+    #output::-webkit-scrollbar-thumb:hover {
+      background: linear-gradient(180deg, #7593b5, #526982);
+    }
+
     .workspace {
       min-height: 0;
       display: flex;
@@ -132,6 +167,46 @@
       gap: 6px;
     }
 
+    .tool-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      min-height: 34px;
+    }
+
+    .tool-btn .ico,
+    .edit-btn .ico,
+    .tog .ico {
+      display: inline-flex;
+      line-height: 1;
+    }
+
+    .tool-btn svg,
+    .edit-btn svg,
+    .tog svg {
+      width: 14px;
+      height: 14px;
+      stroke-width: 2;
+    }
+
+    .tool-btn .lbl {
+      font-size: 11px;
+      letter-spacing: 0.01em;
+    }
+
+    .edit-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      min-height: 32px;
+    }
+
+    .edit-btn .lbl {
+      font-size: 11px;
+    }
+
     .layers {
       display: flex;
       flex-direction: column;
@@ -165,7 +240,9 @@
     .tog {
       min-width: 28px;
       padding: 4px;
-      font-size: 11px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
 
     .tog.is-on {
@@ -321,23 +398,56 @@
       <section class="panel">
         <h2>Tools</h2>
         <div class="tool-row" id="tools">
-          <button class="tool-btn" data-tool="0">Select</button>
-          <button class="tool-btn active" data-tool="1">Brush</button>
-          <button class="tool-btn" data-tool="2">Erase</button>
-          <button class="tool-btn" data-tool="3">Eyedrop</button>
+          <button class="tool-btn" data-tool="0" title="Select">
+            <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m3 3 7 18 2-8 8-2Z"/></svg></span>
+            <span class="lbl">Select</span>
+          </button>
+          <button class="tool-btn active" data-tool="1" title="Brush">
+            <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m9 11 9-9 4 4-9 9"/><path d="M4 20h4l8-8-4-4-8 8z"/></svg></span>
+            <span class="lbl">Brush</span>
+          </button>
+          <button class="tool-btn" data-tool="2" title="Erase">
+            <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m7 21 10-10a2 2 0 0 0 0-3l-4-4a2 2 0 0 0-3 0L0 14l7 7Z"/><path d="M22 21H7"/></svg></span>
+            <span class="lbl">Erase</span>
+          </button>
+          <button class="tool-btn" data-tool="3" title="Eyedropper">
+            <span class="ico"><svg viewBox="0 0 640 640" fill="currentColor"><path d="M405.6 93.2L304 194.8L294.6 185.4C282.1 172.9 261.8 172.9 249.3 185.4C236.8 197.9 236.8 218.2 249.3 230.7L409.3 390.7C421.8 403.2 442.1 403.2 454.6 390.7C467.1 378.2 467.1 357.9 454.6 345.4L445.2 336L546.8 234.4C585.8 195.4 585.8 132.2 546.8 93.3C507.8 54.4 444.6 54.3 405.7 93.3zM119.4 387.3C104.4 402.3 96 422.7 96 443.9L96 486.3L69.4 526.2C60.9 538.9 62.6 555.8 73.4 566.6C84.2 577.4 101.1 579.1 113.8 570.6L153.7 544L196.1 544C217.3 544 237.7 535.6 252.7 520.6L362.1 411.2L316.8 365.9L207.4 475.3C204.4 478.3 200.3 480 196.1 480L160 480L160 443.9C160 439.7 161.7 435.6 164.7 432.6L274.1 323.2L228.8 277.9L119.4 387.3z"/></svg></span>
+            <span class="lbl">Eyedrop</span>
+          </button>
         </div>
       </section>
 
       <section class="panel">
         <h2>Edit</h2>
         <div class="edit-row">
-          <button id="undo-btn">Undo</button>
-          <button id="redo-btn">Redo</button>
-          <button id="cut-btn">Cut</button>
-          <button id="copy-btn">Copy</button>
-          <button id="paste-btn">Paste</button>
-          <button id="clear-btn">Clear</button>
-          <button id="grid-btn">Grid</button>
+          <button class="edit-btn" id="undo-btn" title="Undo">
+            <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 7v6h6"/><path d="M3 13a9 9 0 1 0 3-6.7L3 9"/></svg></span>
+            <span class="lbl">Undo</span>
+          </button>
+          <button class="edit-btn" id="redo-btn" title="Redo">
+            <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 7v6h-6"/><path d="M21 13a9 9 0 1 1-3-6.7L21 9"/></svg></span>
+            <span class="lbl">Redo</span>
+          </button>
+          <button class="edit-btn" id="cut-btn" title="Cut">
+            <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88"/><path d="M14.47 14.48 20 20"/><path d="M8.12 8.12 12 12"/></svg></span>
+            <span class="lbl">Cut</span>
+          </button>
+          <button class="edit-btn" id="copy-btn" title="Copy">
+            <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span>
+            <span class="lbl">Copy</span>
+          </button>
+          <button class="edit-btn" id="paste-btn" title="Paste">
+            <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg></span>
+            <span class="lbl">Paste</span>
+          </button>
+          <button class="edit-btn" id="clear-btn" title="Clear map">
+            <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="3 6 5 6 21 6"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg></span>
+            <span class="lbl">Clear</span>
+          </button>
+          <button class="edit-btn" id="grid-btn" title="Toggle grid">
+            <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg></span>
+            <span class="lbl">Grid</span>
+          </button>
         </div>
       </section>
 
@@ -369,7 +479,10 @@
           <div class="subtle">Left panel: metadata and controls. Right panel: interactive map.</div>
         </div>
         <div>
-          <button id="fit-btn">Fit</button>
+          <button class="edit-btn" id="fit-btn" title="Fit map to viewport">
+            <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M21 16v5h-5"/><path d="M3 8l6-6M21 8l-6-6M3 16l6 6M21 16l-6 6"/></svg></span>
+            <span class="lbl">Fit</span>
+          </button>
           <span class="subtle">Shift + drag for area apply with brush/erase</span>
         </div>
       </div>
@@ -828,12 +941,33 @@
       makeLayerToggle(label, on, click) {
         const btn = document.createElement('button');
         btn.className = `tog${on ? ' is-on' : ''}`;
-        btn.textContent = label;
+        if (label === 'H') {
+          btn.title = on ? 'Layer hidden' : 'Layer visible';
+          btn.innerHTML = `<span class="ico">${this.getFeatherIcon(on ? 'eye-off' : 'eye')}</span>`;
+        } else if (label === 'L') {
+          btn.title = on ? 'Layer locked' : 'Layer unlocked';
+          btn.innerHTML = `<span class="ico">${this.getFeatherIcon(on ? 'lock' : 'unlock')}</span>`;
+        } else {
+          btn.title = on ? 'Solo layer on' : 'Solo layer off';
+          btn.innerHTML = `<span class="ico">${this.getFeatherIcon('target')}</span>`;
+        }
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
           click();
         });
         return btn;
+      }
+
+      getFeatherIcon(name) {
+        const attrs = 'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"';
+        const icons = {
+          eye: `<svg ${attrs}><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z"/><circle cx="12" cy="12" r="3"/></svg>`,
+          'eye-off': `<svg ${attrs}><path d="M10.58 10.58a2 2 0 1 0 2.84 2.84"/><path d="M9.88 4.24A10.94 10.94 0 0 1 12 4c7 0 11 8 11 8a21.8 21.8 0 0 1-5.17 6.17"/><path d="M1 1l22 22"/><path d="M6.71 6.71A22.1 22.1 0 0 0 1 12s4 8 11 8a10.94 10.94 0 0 0 5.29-1.29"/></svg>`,
+          lock: `<svg ${attrs}><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`,
+          unlock: `<svg ${attrs}><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>`,
+          target: `<svg ${attrs}><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>`
+        };
+        return icons[name] || icons.target;
       }
 
       setupCategories() {
