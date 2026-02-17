@@ -727,6 +727,8 @@ static void stbte__brush(stbte_tilemap *tm, int x, int y) {
         continue;
     }
 
+    if (tm->data[y][x][i] == ti->id)
+      return;
     stbte__undo_record(tm, x, y, i, tm->data[y][x][i]);
     tm->data[y][x][i] = ti->id;
     return;
