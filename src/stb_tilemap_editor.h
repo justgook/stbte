@@ -935,7 +935,6 @@ typedef struct
 enum
 {
    STBTE__unlocked,
-   STBTE__protected,
    STBTE__locked,
 };
 
@@ -2315,11 +2314,7 @@ static void stbte__brush_predict(stbte_tilemap *tm, short result[])
             continue;
 
          // if the layer is locked, we can't write to it
-         if (tm->layerinfo[i].locked == STBTE__locked)
-            continue;
-
-         // if the layer is non-empty and protected, can't write to it
-         if (tm->layerinfo[i].locked == STBTE__protected && result[i] != STBTE__BG(tm,i))
+         if (tm->layerinfo[i].locked)
             continue;
       }
 
@@ -2354,11 +2349,7 @@ static void stbte__brush(stbte_tilemap *tm, int x, int y)
             continue;
 
          // if the layer is locked, we can't write to it
-         if (tm->layerinfo[i].locked == STBTE__locked)
-            continue;
-
-         // if the layer is non-empty and protected, can't write to it
-         if (tm->layerinfo[i].locked == STBTE__protected && tm->data[y][x][i] != STBTE__BG(tm,i))
+         if (tm->layerinfo[i].locked)
             continue;
       }
 
@@ -2596,12 +2587,7 @@ static void stbte__paste_stack(stbte_tilemap *tm, short result[], short dest[], 
       if (tm->solo_layer < 0) {
          // check that we're allowed to write to it
          if (tm->layerinfo[i].hidden) return;
-         if (tm->layerinfo[i].locked == STBTE__locked) return;
-         // if protected, dest has to be empty
-         if (tm->layerinfo[i].locked == STBTE__protected && dest[i] != STBTE__BG(tm,i)) return;
-         // if dragging w/o copy, we will try to erase stuff, which protection disallows
-         if (dragging && tm->layerinfo[i].locked == STBTE__protected)
-             return;
+         if (tm->layerinfo[i].locked) return;
       }
       result[i] = dest[i];
       if (src[i] != STBTE__BG(tm,i))
@@ -2612,8 +2598,7 @@ static void stbte__paste_stack(stbte_tilemap *tm, short result[], short dest[], 
    for (i=0; i < tm->num_layers; ++i) {
       result[i] = dest[i];
       if (src[i] != STBTE__NO_TILE)
-         if (!tm->layerinfo[i].hidden && tm->layerinfo[i].locked != STBTE__locked)
-            if (tm->layerinfo[i].locked == STBTE__unlocked || (!dragging && dest[i] == STBTE__BG(tm,i)))
+         if (!tm->layerinfo[i].hidden && !tm->layerinfo[i].locked)
                result[i] = src[i];
    }
 }
@@ -2630,7 +2615,7 @@ static void stbte__clear_stack(stbte_tilemap *tm, short result[])
       result[i] = STBTE__BG(tm,i);
    else
       for (i=0; i < tm->num_layers; ++i)
-         if (!tm->layerinfo[i].hidden && tm->layerinfo[i].locked == STBTE__unlocked)
+         if (!tm->layerinfo[i].hidden && !tm->layerinfo[i].locked)
             result[i] = STBTE__BG(tm,i);
 }
 

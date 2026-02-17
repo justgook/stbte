@@ -117,8 +117,6 @@ static size_t strlen(const char *s) {
 #define STBTE_TOOL_BRUSH     1
 #define STBTE_TOOL_ERASE     2
 #define STBTE_TOOL_EYEDROPPER 3
-#define STBTE_TOOL_FILL      4
-#define STBTE_TOOL_LINK      5
 
 /* ==========================================================================
  * LIFECYCLE
@@ -170,7 +168,6 @@ void stbte_set_current_tool(stbte_tilemap* tm, int tool) {
     case STBTE_TOOL_BRUSH:     stbte__ui.tool = STBTE__tool_brush;   break;
     case STBTE_TOOL_ERASE:     stbte__ui.tool = STBTE__tool_erase;   break;
     case STBTE_TOOL_EYEDROPPER:stbte__ui.tool = STBTE__tool_eyedrop; break;
-    // Fill and Link tools not implemented in headless mode — ignored
   }
 }
 
@@ -199,7 +196,7 @@ void stbte_set_layer_hide(stbte_tilemap* tm, int layer, int hidden) {
 __attribute__((export_name("stbte_set_layer_locked"))) 
 void stbte_set_layer_lock(stbte_tilemap* tm, int layer, int locked) {
   if (layer >= 0 && layer < tm->num_layers) {
-    tm->layerinfo[layer].locked = (locked < 0) ? 0 : (locked > 2) ? 2 : locked;
+    tm->layerinfo[layer].locked = locked ? 1 : 0;
   }
 }
 
@@ -365,8 +362,6 @@ int stbte_get_current_tool(void) {
     case STBTE__tool_brush:   return STBTE_TOOL_BRUSH;
     case STBTE__tool_erase:   return STBTE_TOOL_ERASE;
     case STBTE__tool_eyedrop: return STBTE_TOOL_EYEDROPPER;
-    case STBTE__tool_fill:    return STBTE_TOOL_FILL;
-    case STBTE__tool_link:    return STBTE_TOOL_LINK;
     default:                  return -1;
   }
 }

@@ -608,7 +608,6 @@ export default class ViewStbEditor extends HTMLElement {
         case 'e': action = 2; break  // erase tool
         case 'r': action = 3; break  // rectangle tool
         case 'i': action = 4; break  // eyedropper
-        case 'l': action = 5; break  // link tool
         case 'g': action = 6; break  // toggle grid
         case 'ArrowLeft': action = 13; break // scroll left
         case 'ArrowRight': action = 14; break // scroll right

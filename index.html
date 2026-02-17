@@ -517,12 +517,12 @@
               this.setupLayers();
               this.render();
             }},
-            { label: locked === 0 ? 'U' : locked === 1 ? 'P' : 'L', title: locked === 0 ? 'Unlocked' : locked === 1 ? 'Protected' : 'Locked', state: locked > 0, action: () => {
-              const newLocked = (locked + 1) % 3;
+            { label: 'L', title: 'Locked', state: locked, action: () => {
+              const newLocked = locked ? 0 : 1;
               this.exports.stbte_set_layer_locked(this.tilemap, i, newLocked);
               this.setupLayers();
               this.render();
-              log(`Layer ${i} locked: ${newLocked === 0 ? 'Unlocked' : newLocked === 1 ? 'Protected' : 'Locked'}`);
+              log(`Layer ${i}: ${newLocked ? 'Locked' : 'Unlocked'}`);
             }},
             { label: 'S', title: 'Solo', state: isSolo, action: () => {
               const newSolo = isSolo ? -1 : i;
